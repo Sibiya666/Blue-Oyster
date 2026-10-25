@@ -6,6 +6,7 @@
   ПКМ по сообщению → Приложения → «Привязать роль» / «Отвязать роль»
   /роли — список привязок
   /синк — выдать роли всем, кто уже стоит в реакциях
+Плюс ежедневная выжимка DTF в 21:00 по Москве (digest.py), если задан BARMAN_DIGEST_CHANNEL.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 _tasks: set = set()
+_digest: dict = {}  # одна задача выжимки на процесс: фабрику могут вызвать повторно при переподключении
 
 
 def _env(home: Path) -> dict:
@@ -39,7 +41,8 @@ def register(ctx) -> None:
                                  rebind_error, revoke_after_clear, role_for_reaction, still_reacting,
                                  sync_app_commands, sync_text, unbind_error)
 
-    channel = _env(home).get("BARMAN_ROLES_CHANNEL", "")
+    env = _env(home)
+    channel = env.get("BARMAN_ROLES_CHANNEL", "")
     bindings = Bindings(home / "barman" / "bindings.json")
 
     def factory(bot, adapter=None):
@@ -267,4 +270,81 @@ def register(ctx) -> None:
         bot.add_listener(on_raw_reaction_clear, "on_raw_reaction_clear")
         bot.add_listener(on_raw_reaction_clear, "on_raw_reaction_clear_emoji")
 
+        if env.get("BARMAN_DIGEST_CHANNEL") and not (_digest.get("task") and not _digest["task"].done()):
+            _digest["task"] = asyncio.get_running_loop().create_task(_digest_loop(bot, env, home, discord))
+
     ctx.register_platform_handler("discord", factory)
+
+
+async def _digest_loop(bot, env: dict, home: Path, discord) -> None:
+    """Выжимка DTF: сразу при первом запуске, дальше каждый день в 21:00 по Москве; пропущенный выпуск
+    (бот лежал в 21:00) догоняется при старте. Сбой — повтор через 10 минут, после трёх сбоев выпуск пропускаем."""
+    import asyncio
+    from datetime import datetime
+
+    from .digest import MSK, DigestState, due_slot, next_slot
+    state = DigestState(home / "barman" / "digest.json")
+    await bot.wait_until_ready()
+    failures = 0
+    while True:
+        now = datetime.now(MSK)
+        if due_slot(state.last_posted(), now) is not None:
+            try:
+                await _post_digest(bot, env, discord, now)
+                state.mark(now)
+                failures = 0
+            except Exception:  # noqa: BLE001
+                failures += 1
+                log.warning("barman: digest failed (%s/3)", failures, exc_info=True)
+                if failures >= 3:
+                    state.mark(now)
+                    failures = 0
+                else:
+                    await asyncio.sleep(600)
+                    continue
+        wait = (next_slot(datetime.now(MSK)) - datetime.now(MSK)).total_seconds()
+        await asyncio.sleep(max(1.0, min(wait, 3600.0)))  # просыпаемся хотя бы раз в час: часы могли уйти
+
+
+async def _post_digest(bot, env: dict, discord, now) -> None:
+    import aiohttp
+
+    from .digest import collect_day, day_window, format_digest, pick_top, summarize
+    start, end = day_window(now)
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60),
+                                     headers={"User-Agent": "BarmanBot/1.0 (Discord digest)"}) as http:
+        async def fetch_json(url):
+            async with http.get(url) as r:
+                r.raise_for_status()
+                return (await r.json(content_type=None)).get("result") or {}
+
+        top = pick_top(await collect_day(fetch_json, start), start, end)
+
+        llm = None
+        if env.get("OPENROUTER_API_KEY"):
+            async def llm(messages):
+                body = {"model": env.get("BARMAN_DIGEST_MODEL") or "anthropic/claude-haiku-4.5",
+                        "messages": messages, "temperature": 0.3, "max_tokens": 2000}
+                async with http.post("https://openrouter.ai/api/v1/chat/completions", json=body,
+                                     headers={"Authorization": f"Bearer {env['OPENROUTER_API_KEY']}"}) as r:
+                    r.raise_for_status()
+                    return (await r.json())["choices"][0]["message"]["content"]
+        summaries = await summarize(top, llm)
+
+    channel_id = int(env["BARMAN_DIGEST_CHANNEL"])
+    channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    guild = channel.guild
+    if not channel.permissions_for(guild.me).send_messages:
+        raise PermissionError(f"barman: no Send Messages in digest channel {channel_id}")
+    member = None
+    if env.get("BARMAN_DIGEST_USER"):
+        name = env["BARMAN_DIGEST_USER"].lstrip("@").lower()
+        found = await guild.query_members(query=name, limit=10)
+        member = next((m for m in found if m.name.lower() == name), None)
+        if member is None:
+            log.warning("barman: digest user %r not found on the server", name)
+    pages = format_digest(top, summaries, member.mention if member else None, now)
+    for i, page in enumerate(pages):
+        allowed = discord.AllowedMentions(everyone=False, roles=False, users=[member] if member and i == 0 else False)
+        await channel.send(page, allowed_mentions=allowed, suppress_embeds=True)
+    log.info("barman: digest posted: %d items, %d message(s), mention=%s", len(top), len(pages), bool(member))
