@@ -166,7 +166,7 @@ def register(ctx) -> None:
             cmd.default_permissions, cmd.guild_only = mod_perms, True
             bot.tree.add_command(cmd, override=True)
         import asyncio
-        task = asyncio.get_running_loop().create_task(sync_app_commands(bot, commands))
+        task = asyncio.get_running_loop().create_task(sync_app_commands(bot, commands, adapter))
         _tasks.add(task)  # держим ссылку, иначе задачу может собрать GC
         task.add_done_callback(_tasks.discard)
 

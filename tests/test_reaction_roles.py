@@ -103,3 +103,34 @@ def test_sync_app_commands_upserts_only_missing_and_swallows_errors():
             raise RuntimeError("discord down")
 
     asyncio.run(sync_app_commands(SimpleNamespace(application_id=42, http=Down(), tree=None), [Cmd("x")]))
+
+
+def test_sync_waits_for_hermes_own_sync_before_pushing():
+    import asyncio
+    from types import SimpleNamespace
+    from barman.reaction_roles import sync_app_commands
+    order = []
+
+    class Http:
+        async def get_global_commands(self, app_id):
+            order.append("fetch")
+            return []
+
+        async def upsert_global_command(self, app_id, payload):
+            order.append("push")
+
+    class Cmd:
+        def to_dict(self, tree):
+            return {"name": "роли", "type": 1, "description": "d"}
+
+    async def main():
+        async def hermes_sync():
+            await asyncio.sleep(0.05)
+            order.append("hermes-done")
+
+        adapter = SimpleNamespace(_post_connect_task=asyncio.create_task(hermes_sync()))
+        bot = SimpleNamespace(application_id=1, http=Http(), tree=None)
+        await sync_app_commands(bot, [Cmd()], adapter)
+
+    asyncio.run(main())
+    assert order == ["hermes-done", "fetch", "push"]

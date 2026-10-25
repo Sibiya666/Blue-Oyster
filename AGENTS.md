@@ -37,7 +37,7 @@ deploy/update.sh     выкатка на сервер
 - **TDD:** сначала падающий тест, потом код. Логику выносить в `reaction_roles.py` и тестировать там.
 - Импорты внутри плагина — **только относительные** (`from .reaction_roles import …`): Hermes грузит папку как `hermes_plugins.barman`.
 - `discord` импортируется только внутри фабрики (его даёт Hermes). Модуль под `from __future__ import annotations`, поэтому тип параметра контекстного меню задаётся объектом (`callback.__annotations__[...] = discord.Message`).
-- Hermes синхронизирует команды Discord **до** подключения плагинов. Поэтому бармен сам досылает свои недостающие команды по одной (`sync_app_commands`), чужие не трогает. Массовый `tree.sync()` не использовать — он перезаливает все ~70 команд Hermes.
+- Hermes синхронизирует команды Discord **до** подключения плагинов. Поэтому бармен сам досылает свои недостающие команды по одной (`sync_app_commands`), чужие не трогает, и делает это **после** синхронизации Hermes (она удаляет всё, чего нет в её списке). Массовый `tree.sync()` не использовать — он перезаливает все ~70 команд Hermes.
 - Секреты только в `.env` профиля на сервере. В репозитории (он публичный) — никаких токенов, ID и ключей.
 
 ## Ветки
@@ -52,9 +52,10 @@ deploy/update.sh     выкатка на сервер
 
 ## Где работает и как выкатывать
 
-- Прод: VPS (IP знает владелец, в публичный репо не писать), Docker-контейнер `hermes` (`nousresearch/hermes-agent`), общий с другими профилями. Данные — `/root/.hermes/profiles/barmen` (владелец uid **10000**).
+- Прод: VPS (IP знает владелец, в публичный репо не писать). Отдельный Docker-контейнер **`barmen`** (образ `nousresearch/hermes-agent`, `--memory 768m`, `restart unless-stopped`), данные — `/root/barmen-hermes` → `/opt/data` (владелец uid **10000**). На том же сервере в своём контейнере `hermes` живут другие боты — их не трогать.
 - Вход: `ssh -i ~/.ssh/companion_vps root@<IP>`.
-- Выкатка: `deploy/update.sh <IP>`. Если идёт живой разговор в другом профиле, Hermes откажется перезапускаться — повторить позже.
-- Команды в контейнере — только `docker exec -u 10000 hermes …`.
-- Настройки профиля: `.env` (`DISCORD_BOT_TOKEN`, `BARMAN_ROLES_CHANNEL`, `DISCORD_ALLOWED_CHANNELS`, `OPENROUTER_API_KEY`), `config.yaml` (`plugins.enabled: [barman]`, `platform_toolsets.discord: []`).
-- Привязки — `/root/.hermes/profiles/barmen/barman/bindings.json`. Логи — `profiles/barmen/logs/{agent,errors}.log`.
+- Выкатка: `deploy/update.sh <IP>` — rsync плагина в `/root/barmen-hermes/plugins/barman` и `docker restart barmen`.
+- Команды в контейнере — только `docker exec -u 10000 barmen …` (от root появляются root-файлы и бот ломается).
+- Настройки: `/root/barmen-hermes/.env` (`DISCORD_BOT_TOKEN`, `BARMAN_ROLES_CHANNEL`, `DISCORD_ALLOWED_CHANNELS`, `OPENROUTER_API_KEY`), `config.yaml` (`plugins.enabled: [barman]`, `platform_toolsets.discord: []`).
+- Привязки — `/root/barmen-hermes/barman/bindings.json`. Логи — `/root/barmen-hermes/logs/{agent,errors}.log`, `docker logs barmen`.
+- Один токен — один процесс: не запускать бармена ещё где-то (локально, в другом контейнере) одновременно с сервером.

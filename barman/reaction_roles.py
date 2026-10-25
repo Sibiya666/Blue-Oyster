@@ -93,12 +93,24 @@ def commands_to_push(desired: list[dict], existing: list[dict]) -> list[dict]:
     return [d for d in desired if have.get(str(d["name"])) != norm(d)]
 
 
-async def sync_app_commands(bot, commands) -> None:
+async def _wait_hermes_sync(adapter) -> None:
+    """Ждём, пока Hermes закончит свою синхронизацию команд: она удаляет всё, чего нет в её списке,
+    и, идя параллельно, стёрла бы только что досланные наши команды."""
+    import asyncio
+    for _ in range(5):  # задачу могут пересоздать при переподключении
+        task = getattr(adapter, "_post_connect_task", None)
+        if task is None or task.done():
+            return
+        await asyncio.wait({task}, timeout=900)
+
+
+async def sync_app_commands(bot, commands, adapter=None) -> None:
     """Hermes синхронизирует команды до подключения плагинов, поэтому свои добавляем сами —
-    по одной (upsert), без массовой перезаливки чужих команд."""
+    после его синхронизации, по одной (upsert), без массовой перезаливки чужих команд."""
     import logging
     log = logging.getLogger(__name__)
     try:
+        await _wait_hermes_sync(adapter)
         existing = await bot.http.get_global_commands(bot.application_id)
         push = commands_to_push([c.to_dict(bot.tree) for c in commands], existing)
         for payload in push:
