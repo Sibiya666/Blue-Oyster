@@ -50,6 +50,8 @@ deploy/update.sh     выкатка на сервер
 ## Ветки
 
 - Любое изменение — в отдельной ветке от свежего `main` (`feat/…`, `fix/…`, `docs/…`, `chore/…`), в `main` через PR.
+- На каждый PR GitHub Actions гоняет `pytest` (`.github/workflows/tests.yml`). `main` защищён: влить можно только при зелёной проверке.
+- PR создавать с автомержем: `gh pr create --fill && gh pr merge --auto --squash --delete-branch` — вольётся сам, когда тесты пройдут.
 
 ## Неснимаемые правила
 
