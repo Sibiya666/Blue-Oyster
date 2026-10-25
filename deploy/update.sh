@@ -1,10 +1,10 @@
 #!/bin/sh
 # Выкатить код бармена на сервер и перезапустить его контейнер. Данные (barman/bindings.json, .env) не трогаются.
 # Бармен живёт в своём контейнере `barmen` (данные — /root/barmen-hermes), другие боты не затрагиваются.
-# Использование: deploy/update.sh <IP>
+# Использование: deploy/update.sh <IP>   (после мержа в main это делает .github/workflows/deploy.yml)
 set -eu
 IP="$1"
-KEY="$HOME/.ssh/companion_vps"
+KEY="${BARMAN_SSH_KEY:-$HOME/.ssh/companion_vps}"  # в GitHub Actions — отдельный deploy-ключ
 DATA=/root/barmen-hermes
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ssh -i "$KEY" "root@$IP" "test -d $DATA" || { echo "Нет $DATA на сервере"; exit 1; }

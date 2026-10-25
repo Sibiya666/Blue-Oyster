@@ -1,0 +1,47 @@
+name: deploy
+
+# После мержа в main: тесты, затем выкатка на VPS (deploy/update.sh).
+# Секреты репозитория: VPS_HOST (IP), VPS_SSH_KEY (приватный deploy-ключ), VPS_KNOWN_HOSTS (ssh-keyscan сервера).
+# Пока секретов нет — выкатка пропускается, а не падает.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  deploy:
+    needs: pytest
+    runs-on: ubuntu-latest
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Выкатка на VPS
+        run: |
+          if [ -z "$VPS_HOST" ] || [ -z "$VPS_SSH_KEY" ] || [ -z "$VPS_KNOWN_HOSTS" ]; then
+            echo "::warning::Нет секретов VPS_HOST / VPS_SSH_KEY / VPS_KNOWN_HOSTS — выкатка пропущена"
+            exit 0
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          BARMAN_SSH_KEY=~/.ssh/deploy_key sh deploy/update.sh "$VPS_HOST"

@@ -57,7 +57,7 @@ deploy/update.sh     выкатка на сервер
 2. `gh pr create --fill && gh pr merge --auto --squash` — PR с автомержем.
 3. GitHub Actions гоняет `pytest` на каждом PR (`.github/workflows/tests.yml`). `main` защищён: влить можно только при зелёной проверке, в обход PR — нельзя никому. Зелёный PR без конфликтов вливается сам, ветка на GitHub удаляется сама.
 4. Конфликт с `main` автомердж не решает: `git fetch && git merge origin/main`, поправить, `pytest`, push — PR перепроверится и вольётся.
-5. После мержа — выкатка: `deploy/update.sh <IP>` из свежего `main`.
+5. После мержа GitHub сам выкатывает на VPS (`.github/workflows/deploy.yml`: тесты → `deploy/update.sh`). Руками — только `deploy/update.sh <IP>` из свежего `main`.
 
 ## Неснимаемые правила
 
@@ -70,6 +70,7 @@ deploy/update.sh     выкатка на сервер
 - Прод: VPS (IP знает владелец, в публичный репо не писать). Отдельный Docker-контейнер **`barmen`** (образ `nousresearch/hermes-agent`, `--memory 768m`, `restart unless-stopped`), данные — `/root/barmen-hermes` → `/opt/data` (владелец uid **10000**). На том же сервере в своём контейнере `hermes` живут другие боты — их не трогать.
 - Вход: `ssh -i ~/.ssh/companion_vps root@<IP>`.
 - Выкатка: `deploy/update.sh <IP>` — rsync плагина в `/root/barmen-hermes/plugins/barman` и `docker restart barmen`.
+- Автовыкатка: после каждого мержа в `main` (и вручную — Actions → deploy → Run workflow). Секреты репозитория: `VPS_HOST`, `VPS_SSH_KEY` (отдельный deploy-ключ, не `companion_vps`), `VPS_KNOWN_HOSTS`. Без них выкатка пропускается с предупреждением.
 - Команды в контейнере — только `docker exec -u 10000 barmen …` (от root появляются root-файлы и бот ломается).
 - Настройки: `/root/barmen-hermes/.env` (`DISCORD_BOT_TOKEN`, `BARMAN_ROLES_CHANNEL`, `DISCORD_ALLOWED_CHANNELS`, `OPENROUTER_API_KEY`), `config.yaml` (`plugins.enabled: [barman]`, `platform_toolsets.discord: []`).
 - Привязки — `/root/barmen-hermes/barman/bindings.json`. Логи — `/root/barmen-hermes/logs/{agent,errors}.log`, `docker logs barmen`.

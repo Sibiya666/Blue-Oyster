@@ -1,9 +1,7 @@
 name: tests
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  pull_request:   # push в main проверяет deploy.yml перед выкаткой
 
 permissions:
   contents: read
