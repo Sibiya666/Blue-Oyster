@@ -15,6 +15,9 @@ set -eu
 die() { echo "ship: $*" >&2; exit "${CODE:-1}"; }
 command -v gh >/dev/null || die "нет gh: brew install gh && gh auth login"
 cd "$(git rev-parse --show-toplevel)"
+# remote через SSH-алиас (git@github-blue-oyster:owner/repo.git) gh не узнаёт как GitHub — подсказываем репозиторий
+: "${GH_REPO:=$(git remote get-url origin | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')}"
+export GH_REPO
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [ "$BRANCH" != main ] && [ "$BRANCH" != HEAD ] || die "нужна рабочая ветка, не main"
 [ -z "$(git status --porcelain)" ] || die "есть незакоммиченные изменения"
