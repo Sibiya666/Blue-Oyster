@@ -317,7 +317,7 @@ _COMPARED = ("type", "description", "default_member_permissions", "dm_permission
 
 
 def commands_to_push(desired: list[dict], existing: list[dict]) -> list[dict]:
-    """Какие из наших команд в Discord отсутствуют или отличаются (чужие команды не трогаем)."""
+    """Какие из наших команд в Discord отсутствуют или отличаются."""
     def norm(c: dict) -> tuple:
         return tuple(str(c.get(k) if c.get(k) not in (None, []) else "") for k in _COMPARED)
     have = {str(c.get("name")): norm(c) for c in existing}
@@ -336,14 +336,22 @@ async def _wait_hermes_sync(adapter) -> None:
 
 
 async def sync_app_commands(bot, commands, adapter=None) -> None:
-    """Hermes синхронизирует команды до подключения плагинов, поэтому свои добавляем сами —
-    после его синхронизации, по одной (upsert), без массовой перезаливки чужих команд."""
+    """В Discord у бота должны быть только команды бармена. Свою синхронизацию Hermes на сервере выключена
+    (DISCORD_COMMAND_SYNC_POLICY=off, ставит deploy/update.sh); на случай, если она всё же идёт, ждём её конца.
+    Есть чужие команды (Hermes) → одна перезапись списка только нашими; иначе досылаем недостающие по одной."""
     import logging
     log = logging.getLogger(__name__)
     try:
         await _wait_hermes_sync(adapter)
         existing = await bot.http.get_global_commands(bot.application_id)
-        push = commands_to_push([c.to_dict(bot.tree) for c in commands], existing)
+        desired = [c.to_dict(bot.tree) for c in commands]
+        ours = {str(d["name"]) for d in desired}
+        foreign = [str(c.get("name")) for c in existing if str(c.get("name")) not in ours]
+        if foreign:
+            await bot.http.bulk_upsert_global_commands(bot.application_id, desired)
+            log.info("barman: app commands replaced with ours; removed: %s", foreign)
+            return
+        push = commands_to_push(desired, existing)
         for payload in push:
             await bot.http.upsert_global_command(bot.application_id, payload)
         if push:

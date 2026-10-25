@@ -37,7 +37,8 @@ deploy/update.sh     выкатка на сервер
 - **TDD:** сначала падающий тест, потом код. Логику выносить в `reaction_roles.py` и тестировать там.
 - Импорты внутри плагина — **только относительные** (`from .reaction_roles import …`): Hermes грузит папку как `hermes_plugins.barman`.
 - `discord` импортируется только внутри фабрики (его даёт Hermes). Модуль под `from __future__ import annotations`, поэтому тип параметра контекстного меню задаётся объектом (`callback.__annotations__[...] = discord.Message`).
-- Hermes синхронизирует команды Discord **до** подключения плагинов. Поэтому бармен сам досылает свои недостающие команды по одной (`sync_app_commands`), чужие не трогает, и делает это **после** синхронизации Hermes (она удаляет всё, чего нет в её списке). Массовый `tree.sync()` не использовать — он перезаливает все ~70 команд Hermes.
+- В Discord у бота только команды бармена (`/роли`, `/синк`, «Привязать/Отвязать роль»). Hermes свои команды не регистрирует (`DISCORD_COMMAND_SYNC_POLICY=off`), а бармен при старте (`sync_app_commands`) перезаписывает список своими, если там есть чужие, иначе досылает недостающие по одной. Массовый `tree.sync()` не использовать — он зальёт ~70 команд Hermes.
+- Hermes (ИИ, его команды, ответы в личке) закрыт для всех: `DISCORD_ALLOWED_USERS=0`, `DISCORD_ALLOWED_ROLES=` пусто. Без списка пользователей Hermes пускает всех из `DISCORD_ALLOWED_CHANNELS` — не убирать.
 - Секреты только в `.env` профиля на сервере. В репозитории (он публичный) — никаких токенов, ID и ключей.
 
 ## Известные ограничения (приняты для маленького сервера)
@@ -71,6 +72,7 @@ deploy/update.sh     выкатка на сервер
 - Вход: `ssh -i ~/.ssh/companion_vps root@<IP>`.
 - Выкатка: `deploy/update.sh <IP>` — rsync плагина в `/root/barmen-hermes/plugins/barman` и `docker restart barmen`.
 - Автовыкатка: после каждого мержа в `main` (и вручную — Actions → deploy → Run workflow). Секреты репозитория: `VPS_HOST`, `VPS_SSH_KEY` (отдельный deploy-ключ, не `companion_vps`), `VPS_KNOWN_HOSTS`. Без них выкатка пропускается с предупреждением.
+- Выкатка сама выставляет в `.env` замки Hermes: `DISCORD_COMMAND_SYNC_POLICY=off`, `DISCORD_ALLOWED_USERS=0`, `DISCORD_ALLOWED_ROLES=` (см. `deploy/update.sh`).
 - Канал ролей: секрет `BARMAN_ROLES_CHANNEL` (ID канала). Выкатка вписывает его в `.env` на сервере — сменить канал = поменять секрет и запустить deploy. Секрета нет — `.env` не трогается.
 - Команды в контейнере — только `docker exec -u 10000 barmen …` (от root появляются root-файлы и бот ломается).
 - Настройки: `/root/barmen-hermes/.env` (`DISCORD_BOT_TOKEN`, `BARMAN_ROLES_CHANNEL`, `DISCORD_ALLOWED_CHANNELS`, `OPENROUTER_API_KEY`), `config.yaml` (`plugins.enabled: [barman]`, `platform_toolsets.discord: []`).
