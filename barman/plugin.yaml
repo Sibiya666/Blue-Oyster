@@ -1,0 +1,4 @@
+name: barman
+version: 0.1.0
+description: Бармен — роли по реакциям в канале раздачи ролей.
+kind: standalone

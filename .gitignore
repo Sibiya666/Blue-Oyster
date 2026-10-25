@@ -1,5 +1,6 @@
-node_modules/
-dist/
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
 .env
-.team/
 .DS_Store
