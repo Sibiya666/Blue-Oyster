@@ -194,10 +194,67 @@ async def grant_from_reactions(bindings: Bindings, fetch_message, get_role, memb
     return added, failed
 
 
-def bindings_text(bindings: Bindings, guild_id, roles_channel) -> str:
+async def _reactors(bindings: Bindings, role_id, fetch_message, burst) -> set:
+    """id всех, у кого стоит реакция под любым сообщением этой роли. Удалённые сообщения пропускаем,
+    любой другой сбой пробрасываем."""
+    ids: set = set()
+    for mid, rid in bindings.all().items():
+        if rid != str(role_id):
+            continue
+        try:
+            msg = await fetch_message(mid)
+        except Exception as exc:  # noqa: BLE001
+            if _missing(exc):
+                continue
+            raise
+        for reaction in msg.reactions:
+            async for user in _users(reaction, burst):
+                ids.add(user.id)
+    return ids
+
+
+async def revoke_after_clear(bindings: Bindings, role_id, role, holders, fetch_message, reason: str,
+                             burst=None, locks: RoleLocks | None = None) -> tuple[int, int]:
+    """Модератор очистил реакции (все или один эмодзи) — Discord не говорит, чьи. Поэтому идём по тем,
+    у кого роль сейчас есть (holders), и снимаем её тем, у кого не осталось ни одной реакции под
+    сообщениями этой роли. Сначала один общий снимок реакций (дёшево), затем для каждого кандидата
+    перепроверка под замком: он мог успеть снова поставить реакцию. Сбой снимка пробрасывается и роли
+    не снимаются никому (fail-closed); сбой по участнику — роль ему оставляем. Возвращает (снято, не удалось)."""
+    import contextlib
+    if not may_touch_role(role):
+        return 0, 0
+    reacting = await _reactors(bindings, role_id, fetch_message, burst)
+    removed = failed = 0
+    for member in holders:
+        if member.bot or member.id in reacting:
+            continue
+        try:
+            async with (locks.get(member.id, role_id) if locks else contextlib.nullcontext()):
+                if role not in member.roles:
+                    continue
+                if await still_reacting(bindings, role_id, member.id, fetch_message, burst):
+                    continue
+                await member.remove_roles(role, reason=reason)
+                removed += 1
+        except Exception:  # noqa: BLE001
+            failed += 1
+    return removed, failed
+
+
+DISCORD_LIMIT = 2000
+
+
+def bindings_pages(bindings: Bindings, guild_id, roles_channel, limit: int = DISCORD_LIMIT) -> list[str]:
+    """Список привязок, порезанный по строкам на сообщения не длиннее limit (лимит Discord — 2000)."""
     rows = [f"https://discord.com/channels/{guild_id}/{roles_channel}/{m} → <@&{r}>"
             for m, r in bindings.all().items()]
-    return "\n".join(rows) or "Привязок пока нет."
+    pages: list[str] = []
+    for row in rows:
+        if pages and len(pages[-1]) + 1 + len(row) <= limit:
+            pages[-1] += "\n" + row
+        else:
+            pages.append(row)
+    return pages or ["Привязок пока нет."]
 
 
 _COMPARED = ("type", "description", "default_member_permissions", "dm_permission", "options")

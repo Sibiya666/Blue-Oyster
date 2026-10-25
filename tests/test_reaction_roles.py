@@ -56,12 +56,11 @@ def test_bind_error_rules():
     assert bind_error("777", roles, role_position=6, author_top=5, author_is_owner=True) is None
 
 
-def test_bindings_text(tmp_path):
-    from barman.reaction_roles import bindings_text
+def test_bindings_pages(tmp_path):
+    from barman.reaction_roles import bindings_pages
     b = Bindings(tmp_path / "b.json")
-    assert bindings_text(b, "G", CH) == "Привязок пока нет."
     b.bind("m1", "r1")
-    assert bindings_text(b, "G", CH) == f"https://discord.com/channels/G/{CH}/m1 → <@&r1>"
+    assert bindings_pages(b, "G", CH) == [f"https://discord.com/channels/G/{CH}/m1 → <@&r1>"]
 
 
 def test_commands_to_push_only_missing_or_changed():
@@ -349,3 +348,88 @@ def test_grant_broken_emoji_does_not_skip_other_emoji(tmp_path):
 def test_pin_messages_is_privileged():
     from barman.reaction_roles import is_privileged
     assert is_privileged(_NS(pin_messages=True))
+
+
+# --- очистка реакций модератором («Remove All Reactions» / снять один эмодзи) ---
+
+class _Holder(_Member):
+    def __init__(self, uid, roles=(), bot=False, fail=False):
+        super().__init__(uid, roles)
+        self.bot, self.fail, self.removed = bot, fail, []
+
+    async def remove_roles(self, role, reason=None):
+        if self.fail:
+            raise PermissionError("Forbidden")
+        self.roles.remove(role)
+        self.removed.append(role)
+
+
+def test_revoke_after_clear_removes_role_only_from_those_without_reaction(tmp_path):
+    from barman.reaction_roles import RoleLocks, revoke_after_clear
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "r1")
+    b.bind("m2", "r1")                                    # другое сообщение той же роли
+    role = _NS(id=1, permissions=_NS())
+    h = {i: _Holder(i, [role]) for i in (5, 6, 7, 8)}
+    h[9] = _Holder(9, [role], bot=True)                   # ботов не трогаем
+    # m1 очистили; 6 стоит другим эмодзи на m1, 7 — супер-реакцией, 8 — под m2
+    fetch = _messages({"m1": [[6], _Reaction([], burst_ids=[7])], "m2": [[8]]})
+    removed, failed = _asyncio.run(revoke_after_clear(b, "r1", role, list(h.values()), fetch, reason="t",
+                                                      burst="burst", locks=RoleLocks()))
+    assert (removed, failed) == (1, 0)
+    assert h[5].removed == [role]
+    assert all(h[i].removed == [] for i in (6, 7, 8, 9))
+
+
+def test_revoke_after_clear_is_fail_closed(tmp_path):
+    import pytest
+    from barman.reaction_roles import revoke_after_clear
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "r1")
+    b.bind("m2", "r1")
+    role = _NS(id=1, permissions=_NS())
+    h = _Holder(5, [role])
+    with pytest.raises(_HttpError):                       # Discord сбоит — никого не трогаем
+        _asyncio.run(revoke_after_clear(b, "r1", role, [h], _messages({"m1": [], "m2": _HttpError(503)}),
+                                        reason="t"))
+    assert h.removed == [] and h.roles == [role]
+    admin = _NS(id=2, permissions=_NS(manage_messages=True))
+    a = _Holder(5, [admin])
+    assert _asyncio.run(revoke_after_clear(b, "r1", admin, [a], _messages({"m1": [], "m2": []}),
+                                           reason="t")) == (0, 0)
+    assert a.removed == []                                # роль модерации не снимаем никогда
+    bad = _Holder(6, [role], fail=True)                   # ошибка по одному не мешает остальным
+    ok = _Holder(7, [role])
+    assert _asyncio.run(revoke_after_clear(b, "r1", role, [bad, ok], _messages({"m1": [], "m2": []}),
+                                           reason="t")) == (1, 1)
+
+
+def test_revoke_after_clear_rechecks_under_lock(tmp_path):
+    """Пока шла очистка, участник снова поставил реакцию — роль не снимаем."""
+    from barman.reaction_roles import revoke_after_clear
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "r1")
+    calls = {"n": 0}
+
+    async def fetch(mid):
+        calls["n"] += 1
+        return _NS(reactions=[_Reaction([5] if calls["n"] > 1 else [])])
+
+    role = _NS(id=1, permissions=_NS())
+    h = _Holder(5, [role])
+    assert _asyncio.run(revoke_after_clear(b, "r1", role, [h], fetch, reason="t")) == (0, 0)
+    assert h.removed == []
+
+
+# --- /роли: ответ Discord не длиннее 2000 символов ---
+
+def test_bindings_pages_split_under_discord_limit(tmp_path):
+    from barman.reaction_roles import bindings_pages
+    b = Bindings(tmp_path / "b.json")
+    assert bindings_pages(b, "G", CH) == ["Привязок пока нет."]
+    for i in range(60):
+        b.bind(f"1{i:018d}", f"2{i:018d}")
+    pages = bindings_pages(b, "123456789012345678", CH)
+    assert len(pages) > 1 and all(len(p) <= 2000 for p in pages)
+    lines = "\n".join(pages).split("\n")
+    assert len(lines) == 60 and lines[0].endswith(f"→ <@&2{0:018d}>")   # строки не рвём и не теряем

@@ -34,9 +34,9 @@ def register(ctx) -> None:
     home = Path(getattr(getattr(ctx, "_manager", None), "home_path", "") or os.environ.get("HERMES_HOME", ""))
     if not str(home):
         return
-    from .reaction_roles import (Bindings, RoleLocks, bind_error, bindings_text, grant_from_reactions, is_privileged,
-                                 may_touch_role, rebind_error, role_for_reaction, still_reacting, sync_app_commands,
-                                 unbind_error)
+    from .reaction_roles import (Bindings, RoleLocks, bind_error, bindings_pages, grant_from_reactions, is_privileged,
+                                 may_touch_role, rebind_error, revoke_after_clear, role_for_reaction, still_reacting,
+                                 sync_app_commands, unbind_error)
 
     channel = _env(home).get("BARMAN_ROLES_CHANNEL", "")
     bindings = Bindings(home / "barman" / "bindings.json")
@@ -99,6 +99,24 @@ def register(ctx) -> None:
                         await member.remove_roles(role, reason=reason)
                 except Exception:  # noqa: BLE001
                     log.warning("barman: remove role failed", exc_info=True)
+
+        async def on_raw_reaction_clear(payload):
+            # «Remove All Reactions» или снятие одного эмодзи: Discord не присылает, чьи реакции ушли.
+            # Проверяем тех, у кого роль сейчас есть (кеш участников): без реакции — роль снимаем.
+            rid = role_for_reaction(bindings, channel, payload.channel_id, payload.message_id, False)
+            if not rid or not payload.guild_id:
+                return
+            guild = bot.get_guild(payload.guild_id)
+            role = guild and guild.get_role(int(rid))
+            if not (guild and may_touch_role(role)):
+                return
+            try:
+                removed, failed = await revoke_after_clear(bindings, rid, role, list(role.members),
+                                                           fetch_from(guild), reason, burst=burst, locks=locks)
+                if failed:
+                    log.warning("barman: after reaction clear %s role(s) not removed", failed)
+            except Exception:  # noqa: BLE001 — сбой Discord: роли не снимаем никому
+                log.warning("barman: revoke after reaction clear failed", exc_info=True)
 
         from discord import app_commands
 
@@ -172,8 +190,12 @@ def register(ctx) -> None:
             await hidden(interaction, "Отвязал.")
 
         async def list_cmd(interaction):
-            if await allowed(interaction):
-                await hidden(interaction, bindings_text(bindings, interaction.guild.id, channel))
+            if not await allowed(interaction):
+                return
+            first, *rest = bindings_pages(bindings, interaction.guild.id, channel)  # лимит Discord — 2000 символов
+            await hidden(interaction, first)
+            for page in rest:
+                await interaction.followup.send(page, ephemeral=True, allowed_mentions=quiet)
 
         async def sync_cmd(interaction):
             if not await allowed(interaction):
@@ -212,5 +234,7 @@ def register(ctx) -> None:
 
         bot.add_listener(on_raw_reaction_add, "on_raw_reaction_add")
         bot.add_listener(on_raw_reaction_remove, "on_raw_reaction_remove")
+        bot.add_listener(on_raw_reaction_clear, "on_raw_reaction_clear")
+        bot.add_listener(on_raw_reaction_clear, "on_raw_reaction_clear_emoji")
 
     ctx.register_platform_handler("discord", factory)
