@@ -1,0 +1,19 @@
+[project]
+name = "blue-oyster"
+version = "0.1.0"
+description = "Бармен — Discord-бот на Hermes Agent: роли по реакциям"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["barman"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

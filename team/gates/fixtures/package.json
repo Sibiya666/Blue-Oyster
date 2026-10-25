@@ -1,8 +1,0 @@
-{
-  "name": "gate-fixture",
-  "private": true,
-  "scripts": {
-    "test": "exit 0",
-    "lint": "exit 0"
-  }
-}
