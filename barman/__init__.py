@@ -270,7 +270,9 @@ def register(ctx) -> None:
         bot.add_listener(on_raw_reaction_clear, "on_raw_reaction_clear")
         bot.add_listener(on_raw_reaction_clear, "on_raw_reaction_clear_emoji")
 
-        if env.get("BARMAN_DIGEST_CHANNEL") and not (_digest.get("task") and not _digest["task"].done()):
+        if not env.get("BARMAN_DIGEST_CHANNEL"):
+            log.info("barman: DTF digest disabled (no BARMAN_DIGEST_CHANNEL)")
+        elif not (_digest.get("task") and not _digest["task"].done()):
             _digest["task"] = asyncio.get_running_loop().create_task(_digest_loop(bot, env, home, discord))
 
     ctx.register_platform_handler("discord", factory)

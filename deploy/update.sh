@@ -4,7 +4,7 @@
 #   DISCORD_COMMAND_SYNC_POLICY=off — Hermes не регистрирует свои /-команды (список держит бармен);
 #   DISCORD_ALLOWED_USERS=0, DISCORD_ALLOWED_ROLES= — Hermes (ИИ и его команды) не отвечает никому, в личке молчит;
 #   BARMAN_ROLES_CHANNEL, BARMAN_DIGEST_CHANNEL, BARMAN_DIGEST_USER, BARMAN_DIGEST_MODEL — только если переданы
-#   (канал ролей; канал, кого упомянуть и модель ИИ для ежедневной выжимки DTF).
+#   (канал ролей; канал, кого упомянуть и модель ИИ для ежедневной выжимки DTF; BARMAN_DIGEST_CHANNEL=off — выключить).
 # Бармен живёт в своём контейнере `barmen` (данные — /root/barmen-hermes), другие боты не затрагиваются.
 # Использование: deploy/update.sh <IP>   (после мержа в main это делает .github/workflows/deploy.yml)
 set -eu
@@ -16,7 +16,8 @@ DCH="${BARMAN_DIGEST_CHANNEL:-}"
 DUSER="${BARMAN_DIGEST_USER:-}"
 DMODEL="${BARMAN_DIGEST_MODEL:-}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-case "$CH$DCH" in *[!0-9]*) echo "BARMAN_ROLES_CHANNEL и BARMAN_DIGEST_CHANNEL — числа (ID канала)"; exit 1 ;; esac
+case "$CH" in *[!0-9]*) echo "BARMAN_ROLES_CHANNEL — число (ID канала)"; exit 1 ;; esac
+case "$DCH" in off) ;; *[!0-9]*) echo "BARMAN_DIGEST_CHANNEL — ID канала или off"; exit 1 ;; esac
 case "$DUSER" in *[!A-Za-z0-9_.]*) echo "BARMAN_DIGEST_USER — имя пользователя Discord (буквы, цифры, _ .)"; exit 1 ;; esac
 case "$DMODEL" in *[!A-Za-z0-9_.:/-]*) echo "BARMAN_DIGEST_MODEL — id модели OpenRouter"; exit 1 ;; esac
 ssh -i "$KEY" "root@$IP" "test -d $DATA" || { echo "Нет $DATA на сервере"; exit 1; }
@@ -31,7 +32,11 @@ if [ -n "$CH" ]; then
   set_env BARMAN_ROLES_CHANNEL "$CH"
   echo "Канал ролей: $CH"
 fi
-[ -z "$DCH" ] || set_env BARMAN_DIGEST_CHANNEL "$DCH"
+case "$DCH" in  # off — выжимка выключена: канал в .env очищается, код остаётся
+  "") ;;
+  off) set_env BARMAN_DIGEST_CHANNEL ""; echo "Выжимка DTF выключена" ;;
+  *) set_env BARMAN_DIGEST_CHANNEL "$DCH" ;;
+esac
 [ -z "$DUSER" ] || set_env BARMAN_DIGEST_USER "$DUSER"
 [ -z "$DMODEL" ] || set_env BARMAN_DIGEST_MODEL "$DMODEL"
 ssh -i "$KEY" "root@$IP" "chown -R 10000:10000 $DATA && docker restart barmen >/dev/null"

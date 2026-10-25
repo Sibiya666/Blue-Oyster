@@ -83,7 +83,7 @@ deploy/update.sh     выкатка на сервер
 - Выкатка: `deploy/update.sh <IP>` — rsync плагина в `/root/barmen-hermes/plugins/barman` и `docker restart barmen`.
 - Автовыкатка: после каждого мержа в `main` (и вручную — Actions → deploy → Run workflow). Секреты репозитория: `VPS_HOST`, `VPS_SSH_KEY` (отдельный deploy-ключ, не `companion_vps`), `VPS_KNOWN_HOSTS`. Без них выкатка пропускается с предупреждением.
 - Выкатка сама выставляет в `.env` замки Hermes: `DISCORD_COMMAND_SYNC_POLICY=off`, `DISCORD_ALLOWED_USERS=0`, `DISCORD_ALLOWED_ROLES=` (см. `deploy/update.sh`).
-- Выжимка DTF: секреты `BARMAN_DIGEST_CHANNEL` (ID канала), `BARMAN_DIGEST_USER` (имя пользователя Discord без @, бот находит его на сервере сам), `BARMAN_DIGEST_MODEL` (необязательно). Нет `BARMAN_DIGEST_CHANNEL` — выжимка выключена. Ключ ИИ — `OPENROUTER_API_KEY` из `.env`.
+- Выжимка DTF: секреты `BARMAN_DIGEST_CHANNEL` (ID канала), `BARMAN_DIGEST_USER` (имя пользователя Discord без @, бот находит его на сервере сам), `BARMAN_DIGEST_MODEL` (необязательно). Выключить, не удаляя код: секрет `BARMAN_DIGEST_CHANNEL=off` + deploy (канал в `.env` очищается, в логе «DTF digest disabled»); включить — вернуть ID канала. **Сейчас выключена.** Ключ ИИ — `OPENROUTER_API_KEY` из `.env`.
 - Канал ролей: секрет `BARMAN_ROLES_CHANNEL` (ID канала). Выкатка вписывает его в `.env` на сервере — сменить канал = поменять секрет и запустить deploy. Секрета нет — `.env` не трогается.
 - Команды в контейнере — только `docker exec -u 10000 barmen …` (от root появляются root-файлы и бот ломается).
 - Настройки: `/root/barmen-hermes/.env` (`DISCORD_BOT_TOKEN`, `BARMAN_ROLES_CHANNEL`, `DISCORD_ALLOWED_CHANNELS`, `OPENROUTER_API_KEY`), `config.yaml` (`plugins.enabled: [barman]`, `platform_toolsets.discord: []`).
