@@ -48,17 +48,22 @@ deploy/update.sh     выкатка на сервер
 - `/синк` должен уложиться в 15 минут (срок жизни interaction), иначе итог не придёт.
 - При сбое Discord во время проверки реакций роль **не** снимается (fail-closed) — лучше лишняя роль, чем отнятая.
 
-## Ветки
+## Ветки и мерж
 
-- Любое изменение — в отдельной ветке от свежего `main` (`feat/…`, `fix/…`, `docs/…`, `chore/…`), в `main` через PR.
+- Любое изменение — в отдельной ветке от свежего `main` (`feat/…`, `fix/…`, `docs/…`, `chore/…`), в `main` только через PR.
+- **Напрямую коммитить, пушить или вливать в `main` нельзя никому**, включая владельца (ruleset «main: только через PR…» + защита ветки).
+- **Любой PR требует апрува владельца кода** (@Sibiya666, `.github/CODEOWNERS`); новый push в PR сбрасывает апрув. Чужой PR вливается только после апрува владельца.
+- **Свои PR владелец вливает сам** в обход апрува (одобрить собственный PR GitHub не даёт): кнопка «Merge without waiting for requirements» или `gh pr merge <N> --admin --squash`. Тесты этим не обойти — `main` требует зелёный `pytest` и от админа.
+- **ИИ-агенты PR не вливают** (ни `--admin`, ни `--auto`): создают PR, доводят до зелёных тестов и сообщают владельцу номер PR.
 
 ## Как изменение попадает в main
 
 1. Локально: ревью пройдено, все замечания исправлены, `.venv/bin/pytest -q` зелёный.
-2. `gh pr create --fill && gh pr merge --auto --squash` — PR с автомержем.
-3. GitHub Actions гоняет `pytest` на каждом PR (`.github/workflows/tests.yml`). `main` защищён: влить можно только при зелёной проверке, в обход PR — нельзя никому. Зелёный PR без конфликтов вливается сам, ветка на GitHub удаляется сама.
-4. Конфликт с `main` автомердж не решает: `git fetch && git merge origin/main`, поправить, `pytest`, push — PR перепроверится и вольётся.
-5. После мержа GitHub сам выкатывает на VPS (`.github/workflows/deploy.yml`: тесты → `deploy/update.sh`). Руками — только `deploy/update.sh <IP>` из свежего `main`.
+2. `gh pr create --fill` — PR в `main` (без автомержа: с обязательным апрувом он всё равно не сработает).
+3. GitHub Actions гоняет `pytest` на PR (`.github/workflows/tests.yml`). Красный — чинить в той же ветке.
+4. Конфликт с `main`: `git fetch && git merge origin/main`, поправить, `pytest`, push.
+5. Владелец вливает PR (`gh pr merge <N> --admin --squash` или кнопкой). Ветка на GitHub удаляется сама.
+6. После мержа GitHub сам выкатывает на VPS (`.github/workflows/deploy.yml`: тесты → `deploy/update.sh`). Руками — только `deploy/update.sh <IP>` из свежего `main`.
 
 ## Неснимаемые правила
 
