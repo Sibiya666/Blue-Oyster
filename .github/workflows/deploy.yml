@@ -1,7 +1,8 @@
 name: deploy
 
 # После мержа в main: тесты, затем выкатка на VPS (deploy/update.sh).
-# Секреты репозитория: VPS_HOST (IP), VPS_SSH_KEY (приватный deploy-ключ), VPS_KNOWN_HOSTS (ssh-keyscan сервера).
+# Секреты репозитория: VPS_HOST (IP), VPS_SSH_KEY (приватный deploy-ключ), VPS_KNOWN_HOSTS (ssh-keyscan сервера),
+# BARMAN_ROLES_CHANNEL (необязательно: ID канала ролей — вписывается в .env на сервере).
 # Пока секретов нет — выкатка пропускается, а не падает.
 on:
   push:
@@ -33,6 +34,7 @@ jobs:
       VPS_HOST: ${{ secrets.VPS_HOST }}
       VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
       VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+      BARMAN_ROLES_CHANNEL: ${{ secrets.BARMAN_ROLES_CHANNEL }}  # необязательный: ID канала ролей
     steps:
       - uses: actions/checkout@v4
       - name: Выкатка на VPS
