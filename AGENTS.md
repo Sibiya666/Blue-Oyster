@@ -71,6 +71,7 @@ deploy/update.sh     выкатка на сервер
 - Вход: `ssh -i ~/.ssh/companion_vps root@<IP>`.
 - Выкатка: `deploy/update.sh <IP>` — rsync плагина в `/root/barmen-hermes/plugins/barman` и `docker restart barmen`.
 - Автовыкатка: после каждого мержа в `main` (и вручную — Actions → deploy → Run workflow). Секреты репозитория: `VPS_HOST`, `VPS_SSH_KEY` (отдельный deploy-ключ, не `companion_vps`), `VPS_KNOWN_HOSTS`. Без них выкатка пропускается с предупреждением.
+- Канал ролей: секрет `BARMAN_ROLES_CHANNEL` (ID канала). Выкатка вписывает его в `.env` на сервере — сменить канал = поменять секрет и запустить deploy. Секрета нет — `.env` не трогается.
 - Команды в контейнере — только `docker exec -u 10000 barmen …` (от root появляются root-файлы и бот ломается).
 - Настройки: `/root/barmen-hermes/.env` (`DISCORD_BOT_TOKEN`, `BARMAN_ROLES_CHANNEL`, `DISCORD_ALLOWED_CHANNELS`, `OPENROUTER_API_KEY`), `config.yaml` (`plugins.enabled: [barman]`, `platform_toolsets.discord: []`).
 - Привязки — `/root/barmen-hermes/barman/bindings.json`. Логи — `/root/barmen-hermes/logs/{agent,errors}.log`, `docker logs barmen`.
