@@ -1,4 +1,4 @@
-from barman.reaction_roles import Bindings, parse_role_arg, role_for_reaction
+from barman.reaction_roles import Bindings, role_for_reaction
 
 CH = "100000000000000001"
 
@@ -19,15 +19,6 @@ def test_role_for_reaction_rules(tmp_path):
     assert role_for_reaction(b, CH, channel_id="other", message_id="m1", is_bot=False) is None
     assert role_for_reaction(b, CH, channel_id=CH, message_id="m9", is_bot=False) is None
     assert role_for_reaction(b, CH, channel_id=CH, message_id="m1", is_bot=True) is None
-
-
-def test_parse_role_arg_mention_id_and_name():
-    roles = {"777": "Корги­войны", "888": "Dota 2"}
-    assert parse_role_arg("<@&777>", roles) == "777"
-    assert parse_role_arg("888", roles) == "888"
-    assert parse_role_arg("dota 2", roles) == "888"
-    assert parse_role_arg("@Корги­войны", roles) == "777"
-    assert parse_role_arg("нет такой", roles) is None
 
 
 def test_privileged_roles_never_assignable():

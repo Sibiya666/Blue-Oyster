@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 
@@ -37,17 +36,6 @@ def role_for_reaction(bindings: Bindings, roles_channel: str, channel_id, messag
     if is_bot or str(channel_id) != str(roles_channel):
         return None
     return bindings.all().get(str(message_id))
-
-
-def parse_role_arg(arg: str, roles: dict[str, str]) -> str | None:
-    """«<@&id>», «id» или имя роли (без учёта регистра, с @ или без) → id из roles {id: name}."""
-    a = (arg or "").strip()
-    if m := re.fullmatch(r"<@&(\d+)>", a):
-        return m.group(1) if m.group(1) in roles else None
-    if a in roles:
-        return a
-    name = a.lstrip("@").strip().lower()
-    return next((rid for rid, n in roles.items() if n.lower() == name), None)
 
 
 PRIVILEGED = ("administrator", "manage_guild", "manage_roles", "manage_channels", "manage_webhooks", "ban_members",
