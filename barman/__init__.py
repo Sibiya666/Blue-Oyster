@@ -34,7 +34,9 @@ def register(ctx) -> None:
     home = Path(getattr(getattr(ctx, "_manager", None), "home_path", "") or os.environ.get("HERMES_HOME", ""))
     if not str(home):
         return
-    from .reaction_roles import Bindings, bind_error, bindings_text, is_privileged, role_for_reaction, sync_app_commands
+    from .reaction_roles import (Bindings, RoleLocks, bind_error, bindings_text, grant_from_reactions, is_privileged,
+                                 may_touch_role, rebind_error, role_for_reaction, still_reacting, sync_app_commands,
+                                 unbind_error)
 
     channel = _env(home).get("BARMAN_ROLES_CHANNEL", "")
     bindings = Bindings(home / "barman" / "bindings.json")
@@ -43,6 +45,8 @@ def register(ctx) -> None:
         import discord  # внутри Hermes
 
         reason = "Бармен: роль по реакции"
+        burst = discord.ReactionType.burst  # супер-реакции discord.py по умолчанию не перечисляет
+        locks = RoleLocks()
         quiet = discord.AllowedMentions.none()  # не пинговать роль при ответе бота
 
         def assignable(guild) -> dict[str, str]:
@@ -54,6 +58,12 @@ def register(ctx) -> None:
         async def member_of(guild, user_id):
             return guild.get_member(user_id) or await guild.fetch_member(user_id)
 
+        def fetch_from(guild):
+            async def fetch(mid):
+                ch = guild.get_channel(int(channel)) or await guild.fetch_channel(int(channel))
+                return await ch.fetch_message(int(mid))
+            return fetch
+
         async def on_raw_reaction_add(payload):
             is_bot = bool(payload.member and payload.member.bot)
             rid = role_for_reaction(bindings, channel, payload.channel_id, payload.message_id, is_bot)
@@ -61,11 +71,12 @@ def register(ctx) -> None:
                 return
             guild = bot.get_guild(payload.guild_id)
             role = guild and guild.get_role(int(rid))
-            if role and not is_privileged(role.permissions):  # права роли могли поменять после привязки
+            if guild and may_touch_role(role):  # права роли могли поменять после привязки
                 try:
-                    member = payload.member or await member_of(guild, payload.user_id)
-                    if not member.bot and role not in member.roles:
-                        await member.add_roles(role, reason=reason)
+                    async with locks.get(payload.user_id, rid):
+                        member = payload.member or await member_of(guild, payload.user_id)
+                        if not member.bot:  # без оглядки на кеш ролей: он мог отстать, а выдача идемпотентна
+                            await member.add_roles(role, reason=reason)
                 except Exception:  # noqa: BLE001
                     log.warning("barman: add role failed", exc_info=True)
 
@@ -75,10 +86,16 @@ def register(ctx) -> None:
                 return
             guild = bot.get_guild(payload.guild_id)
             role = guild and guild.get_role(int(rid))
-            if role:
+            if guild and may_touch_role(role):  # роль модератора по реакции не снимаем никогда
                 try:
-                    member = await member_of(guild, payload.user_id)
-                    if not member.bot and role in member.roles:
+                    async with locks.get(payload.user_id, rid):
+                        member = await member_of(guild, payload.user_id)
+                        if member.bot:
+                            return
+                        # реакция могла остаться: другой эмодзи, супер-реакция или другое сообщение этой роли;
+                        # при сбое проверки still_reacting бросает исключение — роль тогда не снимаем
+                        if await still_reacting(bindings, rid, payload.user_id, fetch_from(guild), burst):
+                            return
                         await member.remove_roles(role, reason=reason)
                 except Exception:  # noqa: BLE001
                     log.warning("barman: remove role failed", exc_info=True)
@@ -107,8 +124,15 @@ def register(ctx) -> None:
             @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Выбери роль")
             async def pick(self, interaction, select):
                 role, guild, user = select.values[0], interaction.guild, interaction.user
-                err = bind_error(str(role.id), assignable(guild), role.position, user.top_role.position,
-                                 guild.owner_id == user.id)
+                if not getattr(user.guild_permissions, "manage_roles", False):  # права могли отозвать
+                    await interaction.response.edit_message(content="Нужно право «Управлять ролями».", view=None)
+                    return
+                owner = guild.owner_id == user.id
+                err = rebind_error(bindings, self.message_id, position_in(guild), user.top_role.position, owner)
+                if err:
+                    await interaction.response.edit_message(content=err, view=None)
+                    return
+                err = bind_error(str(role.id), assignable(guild), role.position, user.top_role.position, owner)
                 if err:
                     await interaction.response.edit_message(content=err + " Выбери другую.", view=self)
                     return
@@ -117,15 +141,35 @@ def register(ctx) -> None:
                     content=f"Привязал: реакция под тем сообщением → {role.mention}.",
                     view=None, allowed_mentions=quiet)
 
+        def position_in(guild):
+            return lambda rid: (r.position if (r := guild.get_role(int(rid))) else None)
+
         async def bind_menu(interaction, message):
-            if await allowed(interaction):
-                await hidden(interaction, "К какой роли привязать это сообщение?", view=Picker(str(message.id)))
+            if not await allowed(interaction):
+                return
+            user = interaction.user
+            err = rebind_error(bindings, message.id, position_in(interaction.guild), user.top_role.position,
+                               interaction.guild.owner_id == user.id)
+            if err:
+                await hidden(interaction, err)
+                return
+            await hidden(interaction, "К какой роли привязать это сообщение?", view=Picker(str(message.id)))
 
         async def unbind_menu(interaction, message):
-            if await allowed(interaction):
-                had = str(message.id) in bindings.all()
-                bindings.unbind(str(message.id))
-                await hidden(interaction, "Отвязал." if had else "К этому сообщению роль не привязана.")
+            if not await allowed(interaction):
+                return
+            rid = bindings.all().get(str(message.id))
+            if rid is None:
+                await hidden(interaction, "К этому сообщению роль не привязана.")
+                return
+            role, user = interaction.guild.get_role(int(rid)), interaction.user
+            err = unbind_error(role.position if role else None, user.top_role.position,
+                               interaction.guild.owner_id == user.id)
+            if err:
+                await hidden(interaction, err)
+                return
+            bindings.unbind(str(message.id))
+            await hidden(interaction, "Отвязал.")
 
         async def list_cmd(interaction):
             if await allowed(interaction):
@@ -135,22 +179,18 @@ def register(ctx) -> None:
             if not await allowed(interaction):
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
-            guild, added = interaction.guild, 0
-            for mid, rid in bindings.all().items():
-                role = guild.get_role(int(rid))
-                try:
-                    msg = await interaction.channel.fetch_message(int(mid))
-                except Exception:  # noqa: BLE001
-                    continue
-                for reaction in msg.reactions:
-                    async for user in reaction.users():
-                        if user.bot or role is None or is_privileged(role.permissions):
-                            continue
-                        member = await member_of(guild, user.id)
-                        if role not in member.roles:
-                            await member.add_roles(role, reason=reason)
-                            added += 1
-            await interaction.followup.send(f"Синхронизировал: выдано ролей — {added}.", ephemeral=True)
+            guild = interaction.guild
+            try:
+                added, failed = await grant_from_reactions(
+                    bindings, fetch_from(guild), lambda rid: guild.get_role(int(rid)),
+                    lambda uid: member_of(guild, uid), reason, burst=burst, locks=locks)
+                text = f"Синхронизировал: выдано ролей — {added}."
+                if failed:
+                    text += f" Не удалось — {failed} (ушли с сервера или мне не хватает прав)."
+            except Exception:  # noqa: BLE001
+                log.warning("barman: sync failed", exc_info=True)
+                text = "Не получилось синхронизировать, подробности в логе."
+            await interaction.followup.send(text, ephemeral=True)
 
         # Модуль под `from __future__ import annotations`: тип сообщения для меню задаём объектом.
         bind_menu.__annotations__["message"] = unbind_menu.__annotations__["message"] = discord.Message

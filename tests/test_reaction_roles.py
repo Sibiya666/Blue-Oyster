@@ -134,3 +134,218 @@ def test_sync_waits_for_hermes_own_sync_before_pushing():
 
     asyncio.run(main())
     assert order == ["hermes-done", "fetch", "push"]
+
+
+# --- фейки для асинхронных проверок без discord.py ---
+import asyncio as _asyncio
+from types import SimpleNamespace as _NS
+
+
+class _Reaction:
+    def __init__(self, user_ids, burst_ids=(), broken=False):
+        self._ids, self._burst, self._broken = user_ids, list(burst_ids), broken
+        self.burst_count = len(self._burst)
+
+    async def users(self, type=None):
+        if self._broken:
+            raise _HttpError(503)
+        for i in (self._burst if type == "burst" else self._ids):
+            yield _NS(id=i, bot=(i == 0))
+
+
+class _HttpError(Exception):
+    def __init__(self, status):
+        self.status = status
+
+
+def _messages(table):
+    """{message_id: [[user_ids of reaction1], [..reaction2]]} → async fetch_message."""
+    async def fetch(mid):
+        if str(mid) not in table:
+            raise _HttpError(404)                      # сообщение удалено
+        v = table[str(mid)]
+        if isinstance(v, Exception):
+            raise v
+        return _NS(reactions=[r if isinstance(r, _Reaction) else _Reaction(r) for r in v])
+    return fetch
+
+
+def test_still_reacting_other_emoji_or_other_message_of_same_role(tmp_path):
+    from barman.reaction_roles import still_reacting
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "r1")
+    b.bind("m2", "r1")
+    b.bind("m3", "r2")
+    fetch = _messages({"m1": [[5], [7]], "m2": [[8]], "m3": [[9]]})
+    run = _asyncio.run
+    assert run(still_reacting(b, "r1", 7, fetch))      # убрал одну реакцию, вторая стоит
+    assert run(still_reacting(b, "r1", 8, fetch))      # стоит под другим сообщением той же роли
+    assert not run(still_reacting(b, "r1", 9, fetch))  # реакция только под сообщением другой роли
+    b.bind("gone", "r1")                                # удалённое сообщение не мешает
+    assert not run(still_reacting(b, "r1", 42, fetch))
+
+
+class _Member:
+    def __init__(self, uid, roles=()):
+        self.id, self.roles, self.added = uid, list(roles), []
+
+    async def add_roles(self, role, reason=None):
+        if self.id == 13:
+            raise PermissionError("Forbidden")
+        self.roles.append(role)
+        self.added.append(role)
+
+
+def test_grant_from_reactions_survives_left_members_and_counts_each_once(tmp_path):
+    from barman.reaction_roles import grant_from_reactions
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "r1")
+    b.bind("m2", "r2")
+    role1 = _NS(id=1, permissions=_NS(administrator=False))
+    role2 = _NS(id=2, permissions=_NS(administrator=True))   # стала привилегированной — не выдаём
+    members = {5: _Member(5), 6: _Member(6, [role1]), 13: _Member(13)}
+
+    async def member_of(uid):
+        if uid not in members:
+            raise LookupError("Unknown Member")            # ушёл с сервера
+        return members[uid]
+
+    fetch = _messages({"m1": [[5, 99, 0, 6, 13], [5]], "m2": [[5]]})
+    added, failed = _asyncio.run(grant_from_reactions(
+        b, fetch, {"r1": role1, "r2": role2}.get, member_of, reason="t"))
+    assert (added, failed) == (1, 2)                       # 5 получил; 99 ушёл, 13 — нет прав
+    assert members[5].added == [role1]                     # дважды не выдаём за две реакции
+
+
+def test_unbind_error_respects_hierarchy():
+    from barman.reaction_roles import unbind_error
+    assert unbind_error(role_position=3, author_top=5, author_is_owner=False) is None
+    assert "выше твоей" in unbind_error(role_position=7, author_top=5, author_is_owner=False)
+    assert unbind_error(role_position=7, author_top=5, author_is_owner=True) is None
+    assert unbind_error(role_position=None, author_top=1, author_is_owner=False) is None  # роль удалена
+
+
+def test_should_remove_role_never_for_privileged():
+    from barman.reaction_roles import may_touch_role
+    assert may_touch_role(_NS(permissions=_NS(administrator=False)))
+    assert not may_touch_role(_NS(permissions=_NS(manage_messages=True)))
+    assert not may_touch_role(None)
+
+
+def test_still_reacting_raises_on_transient_error_instead_of_saying_no(tmp_path):
+    import pytest
+    from barman.reaction_roles import still_reacting
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "r1")
+    b.bind("m2", "r1")
+    with pytest.raises(_HttpError):
+        _asyncio.run(still_reacting(b, "r1", 7, _messages({"m1": [[5]], "m2": _HttpError(503)})))
+    with pytest.raises(_HttpError):
+        _asyncio.run(still_reacting(b, "r1", 7, _messages({"m1": [_Reaction([], broken=True)], "m2": [[5]]})))
+
+
+def test_super_reactions_count(tmp_path):
+    from barman.reaction_roles import grant_from_reactions, still_reacting
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "r1")
+    fetch = _messages({"m1": [_Reaction([], burst_ids=[7])]})
+    assert _asyncio.run(still_reacting(b, "r1", 7, fetch, burst="burst"))
+    role = _NS(id=1, permissions=_NS())
+    m = _Member(7)
+    added, failed = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get,
+                                                      lambda uid: _async(m), reason="t", burst="burst"))
+    assert (added, failed) == (1, 0)
+
+
+async def _async(v):
+    return v
+
+
+def test_grant_continues_after_broken_reaction_list(tmp_path):
+    from barman.reaction_roles import grant_from_reactions
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "r1")
+    b.bind("m2", "r1")
+    role = _NS(id=1, permissions=_NS())
+    m = _Member(5)
+    fetch = _messages({"m1": [_Reaction([], broken=True)], "m2": [[5]]})
+    added, failed = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get,
+                                                      lambda uid: _async(m), reason="t"))
+    assert (added, failed) == (1, 1)
+
+
+def test_voice_and_expression_moderation_is_privileged():
+    from barman.reaction_roles import is_privileged
+    for p in ("mute_members", "deafen_members", "move_members", "manage_expressions",
+              "create_expressions", "create_events", "view_guild_insights"):
+        assert is_privileged(_NS(**{p: True})), p
+
+
+def test_rebind_checks_the_role_being_replaced(tmp_path):
+    from barman.reaction_roles import rebind_error
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "high")
+    pos = {"high": 9, "low": 1}.get
+    assert "выше твоей" in rebind_error(b, "m1", pos, author_top=5, author_is_owner=False)
+    assert rebind_error(b, "m1", pos, author_top=5, author_is_owner=True) is None
+    assert rebind_error(b, "m2", pos, author_top=5, author_is_owner=False) is None   # привязки не было
+    b.bind("m3", "low")
+    assert rebind_error(b, "m3", pos, author_top=5, author_is_owner=False) is None
+
+
+def test_role_lock_serializes_same_member_and_role():
+    from barman.reaction_roles import RoleLocks
+    locks = RoleLocks()
+    order = []
+
+    async def job(name, delay):
+        async with locks.get(1, "r1"):
+            order.append(name + "-start")
+            await _asyncio.sleep(delay)
+            order.append(name + "-end")
+
+    async def main():
+        await _asyncio.gather(job("a", 0.02), job("b", 0))
+    _asyncio.run(main())
+    assert order == ["a-start", "a-end", "b-start", "b-end"]
+    assert locks.get(1, "r1") is locks.get(1, "r1") and locks.get(1, "r1") is not locks.get(2, "r1")
+
+
+def test_grant_rechecks_reaction_under_lock(tmp_path):
+    """Пока /синк шёл по списку, участник снял реакцию — роль ему не выдаём."""
+    from barman.reaction_roles import grant_from_reactions
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "r1")
+    table = {"m1": [[5, 6]]}
+    calls = {"n": 0}
+
+    async def fetch(mid):
+        calls["n"] += 1
+        if calls["n"] > 1:              # после первого чтения 6 уже снял реакцию
+            return _NS(reactions=[_Reaction([5])])
+        return _NS(reactions=[_Reaction(table["m1"][0])])
+
+    role = _NS(id=1, permissions=_NS())
+    members = {5: _Member(5), 6: _Member(6)}
+    added, failed = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get,
+                                                      lambda uid: _async(members[uid]), reason="t"))
+    assert (added, failed) == (1, 0) and members[6].added == []
+
+
+def test_grant_broken_emoji_does_not_skip_other_emoji(tmp_path):
+    from barman.reaction_roles import grant_from_reactions
+    b = Bindings(tmp_path / "b.json")
+    b.bind("m1", "r1")
+    role = _NS(id=1, permissions=_NS())
+    m = _Member(5)
+    fetch = _messages({"m1": [_Reaction([], broken=True), _Reaction([5])]})
+
+    async def member_of(uid):
+        return m
+    added, failed = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get, member_of, reason="t"))
+    assert (added, failed) == (1, 1)
+
+
+def test_pin_messages_is_privileged():
+    from barman.reaction_roles import is_privileged
+    assert is_privileged(_NS(pin_messages=True))

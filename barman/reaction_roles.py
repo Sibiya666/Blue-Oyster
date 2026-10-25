@@ -52,7 +52,9 @@ def parse_role_arg(arg: str, roles: dict[str, str]) -> str | None:
 
 PRIVILEGED = ("administrator", "manage_guild", "manage_roles", "manage_channels", "manage_webhooks", "ban_members",
               "kick_members", "moderate_members", "manage_messages", "mention_everyone", "manage_nicknames",
-              "manage_emojis_and_stickers", "manage_events", "manage_threads", "view_audit_log")
+              "manage_emojis_and_stickers", "manage_events", "manage_threads", "view_audit_log",
+              "mute_members", "deafen_members", "move_members", "manage_expressions", "create_expressions",
+              "create_events", "view_guild_insights", "view_creator_monetization_analytics", "pin_messages")
 
 
 def is_privileged(permissions) -> bool:
@@ -74,6 +76,122 @@ def bind_error(role_id: str, assignable: dict[str, str], role_position: int, aut
     if not can_bind(role_position, author_top, author_is_owner):
         return "Эта роль выше твоей — привязать её может только тот, у кого роль выше."
     return None
+
+
+def unbind_error(role_position: int | None, author_top: int, author_is_owner: bool) -> str | None:
+    """Отвязать можно только то, что разрешено привязать (роль ниже своей). Удалённую роль — можно."""
+    if role_position is None or can_bind(role_position, author_top, author_is_owner):
+        return None
+    return "Эта роль выше твоей — отвязать её может только тот, у кого роль выше."
+
+
+def may_touch_role(role) -> bool:
+    """Выдавать и снимать по реакции можно только существующую роль без прав модерации."""
+    return role is not None and not is_privileged(role.permissions)
+
+
+def rebind_error(bindings: Bindings, message_id, role_position, author_top: int,
+                 author_is_owner: bool) -> str | None:
+    """Перепривязка заменяет старую роль — значит, на старую нужны те же права, что и на отвязку.
+    role_position(role_id) → позиция роли или None, если роли уже нет."""
+    old = bindings.all().get(str(message_id))
+    if old is None or unbind_error(role_position(old), author_top, author_is_owner) is None:
+        return None
+    return "К этому сообщению уже привязана роль выше твоей — менять привязку может только тот, у кого роль выше."
+
+
+class RoleLocks:
+    """Замок на пару (участник, роль): выдача, снятие и /синк для одного человека не перемешиваются."""
+
+    def __init__(self):
+        self._locks: dict = {}
+
+    def get(self, user_id, role_id):
+        import asyncio
+        return self._locks.setdefault((int(user_id), str(role_id)), asyncio.Lock())
+
+
+def _missing(exc) -> bool:
+    """Сообщение удалено (404) — это не ошибка, его просто пропускаем."""
+    return getattr(exc, "status", None) == 404
+
+
+async def _users(reaction, burst):
+    """Все, кто поставил реакцию: обычную и супер-реакцию (её discord.py по умолчанию не отдаёт)."""
+    async for user in reaction.users():
+        yield user
+    if burst is not None and getattr(reaction, "burst_count", 0):
+        async for user in reaction.users(type=burst):
+            yield user
+
+
+async def still_reacting(bindings: Bindings, role_id, user_id, fetch_message, burst=None) -> bool:
+    """Стоит ли у участника ещё хоть одна реакция под любым сообщением, привязанным к этой роли.
+    Удалённые сообщения пропускаем; любая другая ошибка пробрасывается — при сомнении роль не снимаем."""
+    for mid, rid in bindings.all().items():
+        if rid != str(role_id):
+            continue
+        try:
+            msg = await fetch_message(mid)
+        except Exception as exc:  # noqa: BLE001
+            if _missing(exc):
+                continue
+            raise
+        for reaction in msg.reactions:
+            async for user in _users(reaction, burst):
+                if user.id == user_id:
+                    return True
+    return False
+
+
+async def _reacts_on(msg, user_id, burst) -> bool:
+    """Стоит ли реакция участника под этим сообщением. Сломанный эмодзи пропускаем — ищем в остальных."""
+    for reaction in msg.reactions:
+        try:
+            async for user in _users(reaction, burst):
+                if user.id == user_id:
+                    return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+async def grant_from_reactions(bindings: Bindings, fetch_message, get_role, member_of, reason: str,
+                               burst=None, locks: RoleLocks | None = None) -> tuple[int, int]:
+    """Выдать роли всем, кто стоит в реакциях. Ошибка по участнику, эмодзи или сообщению (ушёл, нет прав,
+    сбой Discord) не прерывает остальных. Перед выдачей под замком реакцию перепроверяем: пока /синк шёл
+    по списку, её могли снять. Возвращает (выдано, не удалось)."""
+    import contextlib
+    added = failed = 0
+    for mid, rid in bindings.all().items():
+        role = get_role(rid)
+        if not may_touch_role(role):
+            continue
+        try:
+            msg = await fetch_message(mid)
+        except Exception as exc:  # noqa: BLE001
+            failed += 0 if _missing(exc) else 1
+            continue
+        seen: set = set()
+        for reaction in msg.reactions:
+            try:
+                async for user in _users(reaction, burst):
+                    if user.bot or user.id in seen:
+                        continue
+                    seen.add(user.id)
+                    try:
+                        async with (locks.get(user.id, rid) if locks else contextlib.nullcontext()):
+                            if not await _reacts_on(await fetch_message(mid), user.id, burst):
+                                continue
+                            member = await member_of(user.id)
+                            if role not in member.roles:
+                                await member.add_roles(role, reason=reason)
+                                added += 1
+                    except Exception:  # noqa: BLE001
+                        failed += 1
+            except Exception:  # noqa: BLE001 — сбой перечисления одного эмодзи
+                failed += 1
+    return added, failed
 
 
 def bindings_text(bindings: Bindings, guild_id, roles_channel) -> str:
