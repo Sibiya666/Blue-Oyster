@@ -510,3 +510,34 @@ def test_user_facing_texts():
     assert sync_text(2, 0, 0) == "Синхронизировал: выдано ролей — 2."
     t = sync_text(0, 1, 3)
     assert "не удалось — 1" in t.lower() and "3" in t and "удалён" in t
+
+
+def test_sync_app_commands_leaves_only_barman_commands():
+    """В списке команд Discord — только команды бармена: чужие (Hermes) убираются одной перезаписью."""
+    import asyncio
+    from types import SimpleNamespace
+    from barman.reaction_roles import sync_app_commands
+    calls = []
+
+    class Http:
+        async def get_global_commands(self, app_id):
+            return [{"name": "роли", "type": 1, "description": "d"},
+                    {"name": "pause", "type": 1, "description": "hermes"},
+                    {"name": "memory", "type": 1, "description": "hermes"}]
+
+        async def upsert_global_command(self, app_id, payload):
+            calls.append(("upsert", payload["name"]))
+
+        async def bulk_upsert_global_commands(self, app_id, payload):
+            calls.append(("bulk", sorted(p["name"] for p in payload)))
+
+    class Cmd:
+        def __init__(self, name):
+            self.name = name
+
+        def to_dict(self, tree):
+            return {"name": self.name, "type": 1, "description": "d"}
+
+    bot = SimpleNamespace(application_id=7, http=Http(), tree=None)
+    asyncio.run(sync_app_commands(bot, [Cmd("роли"), Cmd("синк")]))
+    assert calls == [("bulk", ["роли", "синк"])]
