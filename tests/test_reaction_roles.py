@@ -210,7 +210,7 @@ def test_grant_from_reactions_survives_left_members_and_counts_each_once(tmp_pat
         return members[uid]
 
     fetch = _messages({"m1": [[5, 99, 0, 6, 13], [5]], "m2": [[5]]})
-    added, failed = _asyncio.run(grant_from_reactions(
+    added, failed, _ = _asyncio.run(grant_from_reactions(
         b, fetch, {"r1": role1, "r2": role2}.get, member_of, reason="t"))
     assert (added, failed) == (1, 2)                       # 5 получил; 99 ушёл, 13 — нет прав
     assert members[5].added == [role1]                     # дважды не выдаём за две реакции
@@ -251,7 +251,7 @@ def test_super_reactions_count(tmp_path):
     assert _asyncio.run(still_reacting(b, "r1", 7, fetch, burst="burst"))
     role = _NS(id=1, permissions=_NS())
     m = _Member(7)
-    added, failed = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get,
+    added, failed, _ = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get,
                                                       lambda uid: _async(m), reason="t", burst="burst"))
     assert (added, failed) == (1, 0)
 
@@ -268,7 +268,7 @@ def test_grant_continues_after_broken_reaction_list(tmp_path):
     role = _NS(id=1, permissions=_NS())
     m = _Member(5)
     fetch = _messages({"m1": [_Reaction([], broken=True)], "m2": [[5]]})
-    added, failed = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get,
+    added, failed, _ = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get,
                                                       lambda uid: _async(m), reason="t"))
     assert (added, failed) == (1, 1)
 
@@ -326,7 +326,7 @@ def test_grant_rechecks_reaction_under_lock(tmp_path):
 
     role = _NS(id=1, permissions=_NS())
     members = {5: _Member(5), 6: _Member(6)}
-    added, failed = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get,
+    added, failed, _ = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get,
                                                       lambda uid: _async(members[uid]), reason="t"))
     assert (added, failed) == (1, 0) and members[6].added == []
 
@@ -341,7 +341,7 @@ def test_grant_broken_emoji_does_not_skip_other_emoji(tmp_path):
 
     async def member_of(uid):
         return m
-    added, failed = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get, member_of, reason="t"))
+    added, failed, _ = _asyncio.run(grant_from_reactions(b, fetch, {"r1": role}.get, member_of, reason="t"))
     assert (added, failed) == (1, 1)
 
 
@@ -426,10 +426,96 @@ def test_revoke_after_clear_rechecks_under_lock(tmp_path):
 def test_bindings_pages_split_under_discord_limit(tmp_path):
     from barman.reaction_roles import bindings_pages
     b = Bindings(tmp_path / "b.json")
-    assert bindings_pages(b, "G", CH) == ["Привязок пока нет."]
+    assert bindings_pages(b, "G", CH)[0].startswith("Привязок пока нет.")
     for i in range(60):
         b.bind(f"1{i:018d}", f"2{i:018d}")
     pages = bindings_pages(b, "123456789012345678", CH)
     assert len(pages) > 1 and all(len(p) <= 2000 for p in pages)
     lines = "\n".join(pages).split("\n")
     assert len(lines) == 60 and lines[0].endswith(f"→ <@&2{0:018d}>")   # строки не рвём и не теряем
+
+
+def test_bindings_text_hint_when_empty_and_problems_marked(tmp_path):
+    from barman.reaction_roles import bindings_pages as bindings_text
+    b = Bindings(tmp_path / "b.json")
+    empty = bindings_text(b, "G", CH)
+    assert len(empty) == 1 and "Привязок пока нет" in empty[0] and "Привязать роль" in empty[0]
+    b.bind("m1", "r1")
+    b.bind("m2", "r2")
+    out = bindings_text(b, "G", CH, {"m2": "роль удалена"})
+    assert out == [f"https://discord.com/channels/G/{CH}/m1 → <@&r1>\n"
+                   f"https://discord.com/channels/G/{CH}/m2 → <@&r2> ⚠️ роль удалена"]
+
+
+def test_bindings_text_split_under_discord_limit(tmp_path):
+    from barman.reaction_roles import bindings_pages as bindings_text
+    b = Bindings(tmp_path / "b.json")
+    for i in range(60):
+        b.bind(f"{10**18 + i}", f"{10**18 + i}")
+    parts = bindings_text(b, "1" * 19, "2" * 19)
+    assert len(parts) > 1 and all(len(p) <= 2000 for p in parts)
+    assert sum(p.count("\n") + 1 for p in parts) == 60       # ни одна строка не потерялась и не разрезана
+
+
+def _role(rid, position, perms=None, managed=False, default=False):
+    return _NS(id=rid, name=f"R{rid}", position=position, permissions=_NS(**(perms or {})), managed=managed,
+               is_default=lambda: default)
+
+
+def test_role_problem_says_exactly_what_to_fix():
+    from barman.reaction_roles import role_problem
+    assert role_problem(_role(1, 3), bot_top=5) is None
+    assert "удален" in role_problem(None, bot_top=5)
+    assert "выше" in role_problem(_role(1, 7), bot_top=5) and "Бармен" in role_problem(_role(1, 7), bot_top=5)
+    assert "модерац" in role_problem(_role(1, 3, {"ban_members": True}), bot_top=5)
+    assert "интеграц" in role_problem(_role(1, 3, managed=True), bot_top=5)
+    assert role_problem(_role(1, 0, default=True), bot_top=5) is not None
+
+
+def test_pickable_roles_only_what_bot_and_author_can_bind_sorted_and_capped():
+    from barman.reaction_roles import pickable_roles
+    roles = [_role(1, 1), _role(2, 2), _role(3, 4), _role(4, 9), _role(5, 2, {"administrator": True}),
+             _role(6, 0, default=True), _role(7, 3, managed=True)]
+    got, cut = pickable_roles(roles, bot_top=8, author_top=4, author_is_owner=False)
+    assert [r.id for r in got] == [2, 1] and not cut          # 3 — не ниже автора, 4 — выше бота
+    got, _ = pickable_roles(roles, bot_top=8, author_top=4, author_is_owner=True)
+    assert [r.id for r in got] == [3, 2, 1]
+    many = [_role(i, i) for i in range(1, 40)]
+    got, cut = pickable_roles(many, bot_top=100, author_top=100, author_is_owner=False)
+    assert len(got) == 25 and cut and got[0].id == 39
+
+
+def test_binding_problems_reports_roles_and_deleted_messages(tmp_path):
+    from barman.reaction_roles import binding_problems
+    b = Bindings(tmp_path / "b.json")
+    b.bind("ok", "r1")
+    b.bind("high", "r2")
+    b.bind("gone", "r1")
+    b.bind("norole", "r9")
+    roles = {"r1": _role(1, 2), "r2": _role(2, 9)}
+    fetch = _messages({"ok": [[1]], "high": [[1]], "norole": [[1]]})
+    got = _asyncio.run(binding_problems(b, roles.get, fetch, bot_top=5))
+    assert set(got) == {"high", "gone", "norole"}
+    assert "выше" in got["high"] and "удалено" in got["gone"] and "удален" in got["norole"]
+
+
+def test_grant_cleans_bindings_of_deleted_messages(tmp_path):
+    from barman.reaction_roles import grant_from_reactions
+    b = Bindings(tmp_path / "b.json")
+    b.bind("gone", "r1")
+    b.bind("m1", "r1")
+    role = _NS(id=1, permissions=_NS())
+    m = _Member(5)
+    added, failed, cleaned = _asyncio.run(grant_from_reactions(
+        b, _messages({"m1": [[5]]}), {"r1": role}.get, lambda uid: _async(m), reason="t"))
+    assert (added, failed, cleaned) == (1, 0, 1) and b.all() == {"m1": "r1"}
+
+
+def test_user_facing_texts():
+    from barman.reaction_roles import UNBIND_DONE, bind_done_text, sync_text
+    assert "осталась" in UNBIND_DONE
+    assert "✅" in bind_done_text("<@&1>", seeded=True)
+    assert "не смог" in bind_done_text("<@&1>", seeded=False)
+    assert sync_text(2, 0, 0) == "Синхронизировал: выдано ролей — 2."
+    t = sync_text(0, 1, 3)
+    assert "не удалось — 1" in t.lower() and "3" in t and "удалён" in t

@@ -160,17 +160,21 @@ async def grant_from_reactions(bindings: Bindings, fetch_message, get_role, memb
                                burst=None, locks: RoleLocks | None = None) -> tuple[int, int]:
     """Выдать роли всем, кто стоит в реакциях. Ошибка по участнику, эмодзи или сообщению (ушёл, нет прав,
     сбой Discord) не прерывает остальных. Перед выдачей под замком реакцию перепроверяем: пока /синк шёл
-    по списку, её могли снять. Возвращает (выдано, не удалось)."""
+    по списку, её могли снять. Привязки удалённых сообщений убираем. Возвращает (выдано, не удалось, убрано)."""
     import contextlib
-    added = failed = 0
+    added = failed = cleaned = 0
     for mid, rid in bindings.all().items():
         role = get_role(rid)
-        if not may_touch_role(role):
-            continue
         try:
             msg = await fetch_message(mid)
         except Exception as exc:  # noqa: BLE001
-            failed += 0 if _missing(exc) else 1
+            if _missing(exc):  # сообщение удалили — привязка больше не нужна
+                bindings.unbind(mid)
+                cleaned += 1
+            else:
+                failed += 1
+            continue
+        if not may_touch_role(role):
             continue
         seen: set = set()
         for reaction in msg.reactions:
@@ -191,7 +195,7 @@ async def grant_from_reactions(bindings: Bindings, fetch_message, get_role, memb
                         failed += 1
             except Exception:  # noqa: BLE001 — сбой перечисления одного эмодзи
                 failed += 1
-    return added, failed
+    return added, failed, cleaned
 
 
 async def _reactors(bindings: Bindings, role_id, fetch_message, burst) -> set:
@@ -244,9 +248,18 @@ async def revoke_after_clear(bindings: Bindings, role_id, role, holders, fetch_m
 DISCORD_LIMIT = 2000
 
 
-def bindings_pages(bindings: Bindings, guild_id, roles_channel, limit: int = DISCORD_LIMIT) -> list[str]:
-    """Список привязок, порезанный по строкам на сообщения не длиннее limit (лимит Discord — 2000)."""
+HOW_TO_BIND = "ПКМ по сообщению в канале ролей → Приложения → «Привязать роль»."
+UNBIND_DONE = ("Отвязал. У тех, кто уже получил роль, она осталась — "
+               "если нужно, сними её вручную в настройках сервера.")
+
+
+def bindings_pages(bindings: Bindings, guild_id, roles_channel, problems: dict | None = None,
+                   limit: int = DISCORD_LIMIT) -> list[str]:
+    """Список привязок, порезанный по строкам на сообщения не длиннее limit (лимит Discord — 2000).
+    problems: {message_id: что не так} — помечается ⚠️. Пустой список — с подсказкой, как привязать."""
+    problems = problems or {}
     rows = [f"https://discord.com/channels/{guild_id}/{roles_channel}/{m} → <@&{r}>"
+            + (f" ⚠️ {problems[m]}" if m in problems else "")
             for m, r in bindings.all().items()]
     pages: list[str] = []
     for row in rows:
@@ -254,7 +267,62 @@ def bindings_pages(bindings: Bindings, guild_id, roles_channel, limit: int = DIS
             pages[-1] += "\n" + row
         else:
             pages.append(row)
-    return pages or ["Привязок пока нет."]
+    return pages or [f"Привязок пока нет. Чтобы добавить: {HOW_TO_BIND}"]
+
+
+def role_problem(role, bot_top: int) -> str | None:
+    """Почему бот не сможет выдавать эту роль — с подсказкой, что починить. None — всё в порядке."""
+    if role is None:
+        return "роль удалена"
+    if role.is_default():
+        return "это @everyone, её нельзя выдать"
+    if getattr(role, "managed", False):
+        return "роль управляется интеграцией (ботом или подпиской), её нельзя выдать"
+    if is_privileged(role.permissions):
+        return "у роли права модерации — по реакции такие не выдаю"
+    if role.position >= bot_top:
+        return "роль выше моей — подними роль «Бармен» выше неё в настройках сервера"
+    return None
+
+
+def pickable_roles(roles, bot_top: int, author_top: int, author_is_owner: bool, limit: int = 25):
+    """Роли, которые этот модератор может привязать, а бот — выдать. Сверху вниз; в меню Discord влезает 25.
+    Возвращает (роли, обрезан_ли_список)."""
+    ok = [r for r in roles if role_problem(r, bot_top) is None and can_bind(r.position, author_top, author_is_owner)]
+    ok.sort(key=lambda r: -r.position)
+    return ok[:limit], len(ok) > limit
+
+
+async def binding_problems(bindings: Bindings, get_role, fetch_message, bot_top: int) -> dict:
+    """Что сломано в привязках: роль удалена/выше бота/стала модераторской, сообщение удалено."""
+    out = {}
+    for mid, rid in bindings.all().items():
+        problem = role_problem(get_role(rid), bot_top)
+        if problem is None:
+            try:
+                await fetch_message(mid)
+            except Exception as exc:  # noqa: BLE001
+                problem = ("сообщение удалено — /синк уберёт привязку" if _missing(exc)
+                           else "не смог проверить сообщение")
+        if problem:
+            out[mid] = problem
+    return out
+
+
+def bind_done_text(role_mention: str, seeded: bool) -> str:
+    if seeded:
+        return f"Привязал: реакция под тем сообщением → {role_mention}. Поставил ✅, чтобы участникам было что нажать."
+    return (f"Привязал: реакция под тем сообщением → {role_mention}. Но не смог поставить ✅ — "
+            "дай мне право «Добавлять реакции» в этом канале, иначе участникам может быть нечего нажать.")
+
+
+def sync_text(added: int, failed: int, cleaned: int) -> str:
+    text = f"Синхронизировал: выдано ролей — {added}."
+    if failed:
+        text += f" Не удалось — {failed} (ушли с сервера, мне не хватает прав или сбой Discord)."
+    if cleaned:
+        text += f" Убрал привязок удалённых сообщений — {cleaned}."
+    return text
 
 
 _COMPARED = ("type", "description", "default_member_permissions", "dm_permission", "options")

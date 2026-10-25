@@ -34,9 +34,10 @@ def register(ctx) -> None:
     home = Path(getattr(getattr(ctx, "_manager", None), "home_path", "") or os.environ.get("HERMES_HOME", ""))
     if not str(home):
         return
-    from .reaction_roles import (Bindings, RoleLocks, bind_error, bindings_pages, grant_from_reactions, is_privileged,
-                                 may_touch_role, rebind_error, revoke_after_clear, role_for_reaction, still_reacting,
-                                 sync_app_commands, unbind_error)
+    from .reaction_roles import (UNBIND_DONE, Bindings, RoleLocks, bind_done_text, bind_error, binding_problems,
+                                 bindings_pages, grant_from_reactions, is_privileged, may_touch_role, pickable_roles,
+                                 rebind_error, revoke_after_clear, role_for_reaction, still_reacting,
+                                 sync_app_commands, sync_text, unbind_error)
 
     channel = _env(home).get("BARMAN_ROLES_CHANNEL", "")
     bindings = Bindings(home / "barman" / "bindings.json")
@@ -134,14 +135,24 @@ def register(ctx) -> None:
                 return False
             return True
 
+        def bot_top(guild) -> int:
+            return guild.me.top_role.position if guild.me else 0
+
         class Picker(discord.ui.View):
-            def __init__(self, message_id: str):
+            """Меню только из ролей, которые этот модератор может привязать, а бот — выдать."""
+
+            def __init__(self, message_id: str, roles):
                 super().__init__(timeout=300)
                 self.message_id = message_id
+                select = discord.ui.Select(placeholder="Выбери роль", options=[
+                    discord.SelectOption(label=r.name[:100], value=str(r.id)) for r in roles])
+                select.callback = self.pick
+                self.add_item(select)
+                self.select = select
 
-            @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Выбери роль")
-            async def pick(self, interaction, select):
-                role, guild, user = select.values[0], interaction.guild, interaction.user
+            async def pick(self, interaction):
+                guild, user = interaction.guild, interaction.user
+                role = guild.get_role(int(self.select.values[0]))
                 if not getattr(user.guild_permissions, "manage_roles", False):  # права могли отозвать
                     await interaction.response.edit_message(content="Нужно право «Управлять ролями».", view=None)
                     return
@@ -150,14 +161,19 @@ def register(ctx) -> None:
                 if err:
                     await interaction.response.edit_message(content=err, view=None)
                     return
-                err = bind_error(str(role.id), assignable(guild), role.position, user.top_role.position, owner)
-                if err:
-                    await interaction.response.edit_message(content=err + " Выбери другую.", view=self)
+                err = role is None and "Роль уже удалили." or bind_error(
+                    str(role.id), assignable(guild), role.position, user.top_role.position, owner)
+                if err:  # пока меню было открыто, роли могли поменять
+                    await interaction.response.edit_message(content=err + " Открой меню заново.", view=None)
                     return
                 bindings.bind(self.message_id, str(role.id))
-                await interaction.response.edit_message(
-                    content=f"Привязал: реакция под тем сообщением → {role.mention}.",
-                    view=None, allowed_mentions=quiet)
+                seeded = True
+                try:  # своя реакция: участникам сразу видно, что нажать (реакции бота бармен игнорирует)
+                    await (await fetch_from(guild)(self.message_id)).add_reaction("✅")
+                except Exception:  # noqa: BLE001
+                    seeded = False
+                await interaction.response.edit_message(content=bind_done_text(role.mention, seeded),
+                                                        view=None, allowed_mentions=quiet)
 
         def position_in(guild):
             return lambda rid: (r.position if (r := guild.get_role(int(rid))) else None)
@@ -171,7 +187,17 @@ def register(ctx) -> None:
             if err:
                 await hidden(interaction, err)
                 return
-            await hidden(interaction, "К какой роли привязать это сообщение?", view=Picker(str(message.id)))
+            roles, cut = pickable_roles(interaction.guild.roles, bot_top(interaction.guild), user.top_role.position,
+                                        interaction.guild.owner_id == user.id)
+            if not roles:
+                await hidden(interaction, "Нет ролей, которые я могу выдать от твоего имени. Роль «Бармен» должна "
+                                          "стоять выше раздаваемых ролей, а сами роли — без прав модерации "
+                                          "и ниже твоей.")
+                return
+            text = "К какой роли привязать это сообщение?"
+            if cut:
+                text += " Показаны 25 верхних — Discord больше в меню не помещает."
+            await hidden(interaction, text, view=Picker(str(message.id), roles))
 
         async def unbind_menu(interaction, message):
             if not await allowed(interaction):
@@ -187,14 +213,20 @@ def register(ctx) -> None:
                 await hidden(interaction, err)
                 return
             bindings.unbind(str(message.id))
-            await hidden(interaction, "Отвязал.")
+            await hidden(interaction, UNBIND_DONE)
 
         async def list_cmd(interaction):
             if not await allowed(interaction):
                 return
-            first, *rest = bindings_pages(bindings, interaction.guild.id, channel)  # лимит Discord — 2000 символов
-            await hidden(interaction, first)
-            for page in rest:
+            await interaction.response.defer(ephemeral=True, thinking=True)  # проверка ходит в Discord
+            guild = interaction.guild
+            try:
+                problems = await binding_problems(bindings, lambda rid: guild.get_role(int(rid)), fetch_from(guild),
+                                                  bot_top(guild))
+            except Exception:  # noqa: BLE001
+                log.warning("barman: binding check failed", exc_info=True)
+                problems = {}
+            for page in bindings_pages(bindings, guild.id, channel, problems):  # лимит Discord — 2000 символов
                 await interaction.followup.send(page, ephemeral=True, allowed_mentions=quiet)
 
         async def sync_cmd(interaction):
@@ -203,12 +235,10 @@ def register(ctx) -> None:
             await interaction.response.defer(ephemeral=True, thinking=True)
             guild = interaction.guild
             try:
-                added, failed = await grant_from_reactions(
+                added, failed, cleaned = await grant_from_reactions(
                     bindings, fetch_from(guild), lambda rid: guild.get_role(int(rid)),
                     lambda uid: member_of(guild, uid), reason, burst=burst, locks=locks)
-                text = f"Синхронизировал: выдано ролей — {added}."
-                if failed:
-                    text += f" Не удалось — {failed} (ушли с сервера или мне не хватает прав)."
+                text = sync_text(added, failed, cleaned)
             except Exception:  # noqa: BLE001
                 log.warning("barman: sync failed", exc_info=True)
                 text = "Не получилось синхронизировать, подробности в логе."
