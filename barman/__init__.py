@@ -6,7 +6,8 @@
   ПКМ по сообщению → Приложения → «Привязать роль» / «Отвязать роль»
   /роли — список привязок
   /синк — выдать роли всем, кто уже стоит в реакциях
-Плюс ежедневная выжимка DTF в 21:00 по Москве (digest.py), если задан BARMAN_DIGEST_CHANNEL.
+Плюс ежедневная выжимка DTF в 21:00 по Москве (digest.py), если задан BARMAN_DIGEST_CHANNEL,
+и редкие реплики на сообщения выбранных завсегдатаев (comments.py), если заданы BARMAN_COMMENT_USERS/CHANNELS.
 """
 from __future__ import annotations
 
@@ -270,6 +271,32 @@ def register(ctx) -> None:
         bot.add_listener(on_raw_reaction_clear, "on_raw_reaction_clear")
         bot.add_listener(on_raw_reaction_clear, "on_raw_reaction_clear_emoji")
 
+        from .comments import CommentGate, parse_settings
+        comment_settings = parse_settings(env)
+        if comment_settings is None:
+            log.info("barman: comments off (no BARMAN_COMMENT_USERS / BARMAN_COMMENT_CHANNELS)")
+        else:
+            gate = CommentGate(comment_settings)
+
+            async def on_message(message):
+                import random
+                from datetime import datetime, timezone
+                if message.guild is None:
+                    return
+                ref = getattr(getattr(message, "reference", None), "resolved", None)
+                mentions_bot = bot.user in message.mentions or getattr(ref, "author", None) == bot.user
+                now = datetime.now(timezone.utc)
+                if not gate.should_comment(author_id=message.author.id, channel_id=message.channel.id,
+                                           content=message.content, mentions_bot=mentions_bot,
+                                           author_is_bot=message.author.bot, now=now, roll=random.random()):
+                    return
+                gate.mark(now)  # до запроса к ИИ: два сообщения подряд не дадут две реплики
+                task = asyncio.get_running_loop().create_task(_comment(bot, env, home, discord, message))
+                _tasks.add(task)
+                task.add_done_callback(_tasks.discard)
+
+            bot.add_listener(on_message, "on_message")
+
         if not env.get("BARMAN_DIGEST_CHANNEL"):
             log.info("barman: DTF digest disabled (no BARMAN_DIGEST_CHANNEL)")
         elif not (_digest.get("task") and not _digest["task"].done()):
@@ -350,3 +377,27 @@ async def _post_digest(bot, env: dict, discord, now) -> None:
         allowed = discord.AllowedMentions(everyone=False, roles=False, users=[member] if member and i == 0 else False)
         await channel.send(page, allowed_mentions=allowed, suppress_embeds=True)
     log.info("barman: digest posted: %d items, %d message(s), mention=%s", len(top), len(pages), bool(member))
+
+
+async def _comment(bot, env: dict, home: Path, discord, message) -> None:
+    """Короткая реплика бармена на сообщение завсегдатая: голос из SOUL.md, ответ реплаем без пинга."""
+    import aiohttp
+
+    from .comments import build_messages, clean_reply
+    try:
+        soul = (home / "SOUL.md").read_text(encoding="utf-8")
+        context = [(m.author.display_name, m.content) async for m in message.channel.history(limit=8, before=message)]
+        msgs = build_messages(soul, message.author.display_name, message.content, list(reversed(context)))
+        body = {"model": env.get("BARMAN_COMMENT_MODEL") or "anthropic/claude-haiku-5.5",
+                "messages": msgs, "temperature": 0.8, "max_tokens": 120}
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as http:
+            async with http.post("https://openrouter.ai/api/v1/chat/completions", json=body,
+                                 headers={"Authorization": f"Bearer {env['OPENROUTER_API_KEY']}"}) as r:
+                r.raise_for_status()
+                text = (await r.json())["choices"][0]["message"]["content"]
+        reply = clean_reply(text)
+        if reply:
+            await message.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+            log.info("barman: commented on a message in %s", message.channel.id)
+    except Exception:  # noqa: BLE001
+        log.warning("barman: comment failed", exc_info=True)

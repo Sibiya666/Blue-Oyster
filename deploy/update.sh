@@ -15,6 +15,8 @@
 #   DISCORD_HOME_CHANNEL=0 — «домашнего» канала нет: служебные сообщения Hermes (перезапуск, cron) никуда не уходят,
 #   и нет подсказки «введите /sethome»; display.busy_input_mode=queue и HERMES_GATEWAY_BUSY_ACK_ENABLED=false —
 #   если дописали, пока бармен думает, он ответит отдельно и без служебных плашек.
+# Реплики без обращения (barman/comments.py): BARMAN_COMMENT_USERS — чьи сообщения изредка комментировать (нет — 0, выкл),
+#   канал = BARMAN_AI_CHANNELS, модель = BARMAN_AI_MODEL; BARMAN_COMMENT_CHANCE (0.1) и BARMAN_COMMENT_COOLDOWN_MIN (60) — по желанию.
 # model.default = BARMAN_AI_MODEL — модель OpenRouter для разговора (только если передан).
 # SOUL.md = persona/SOUL.<BARMAN_SOUL>.md с эмодзи из BARMAN_EMOJI («peka=ID,…») — только если BARMAN_SOUL передан.
 #   BARMAN_ROLES_CHANNEL, BARMAN_DIGEST_CHANNEL, BARMAN_DIGEST_USER, BARMAN_DIGEST_MODEL — только если переданы
@@ -34,12 +36,16 @@ AICH="${BARMAN_AI_CHANNELS:-}"
 SOUL="${BARMAN_SOUL:-}"
 EMOJI="${BARMAN_EMOJI:-}"
 AIMODEL="${BARMAN_AI_MODEL:-}"
+CUSERS="${BARMAN_COMMENT_USERS:-}"
+CCHANCE="${BARMAN_COMMENT_CHANCE:-}"
+CCOOL="${BARMAN_COMMENT_COOLDOWN_MIN:-}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 case "$CH" in *[!0-9]*) echo "BARMAN_ROLES_CHANNEL — число (ID канала)"; exit 1 ;; esac
 case "$DCH" in off) ;; *[!0-9]*) echo "BARMAN_DIGEST_CHANNEL — ID канала или off"; exit 1 ;; esac
 case "$DUSER" in *[!A-Za-z0-9_.]*) echo "BARMAN_DIGEST_USER — имя пользователя Discord (буквы, цифры, _ .)"; exit 1 ;; esac
 case "$DMODEL$AIMODEL" in *[!A-Za-z0-9_.:/-]*) echo "BARMAN_DIGEST_MODEL / BARMAN_AI_MODEL — id модели OpenRouter"; exit 1 ;; esac
-case "$AIUSERS$AICH" in *[!0-9,]*) echo "BARMAN_AI_USERS / BARMAN_AI_CHANNELS — ID через запятую"; exit 1 ;; esac
+case "$AIUSERS$AICH$CUSERS" in *[!0-9,]*) echo "BARMAN_AI_USERS / BARMAN_AI_CHANNELS / BARMAN_COMMENT_USERS — ID через запятую"; exit 1 ;; esac
+case "$CCHANCE$CCOOL" in *[!0-9.]*) echo "BARMAN_COMMENT_CHANCE / BARMAN_COMMENT_COOLDOWN_MIN — числа"; exit 1 ;; esac
 case "$SOUL" in *[!a-z0-9_-]*) echo "BARMAN_SOUL — имя личности из persona/ (например sibiya)"; exit 1 ;; esac
 SOUL_FILE=""
 if [ -n "$SOUL" ]; then  # собираем до выкатки: кривые BARMAN_EMOJI или нет файла — стоп, сервер не тронут
@@ -74,6 +80,11 @@ set_env HERMES_GATEWAY_BUSY_ACK_ENABLED false  # без служебных «⚡
 set_env DISCORD_ALLOWED_ROLES ""
 set_env DISCORD_ALLOWED_USERS "${AIUSERS:-0}"
 [ -z "$AICH" ] || set_env DISCORD_ALLOWED_CHANNELS "$AICH"
+set_env BARMAN_COMMENT_USERS "${CUSERS:-0}"
+[ -z "$AICH" ] || set_env BARMAN_COMMENT_CHANNELS "$AICH"
+[ -z "$AIMODEL" ] || set_env BARMAN_COMMENT_MODEL "$AIMODEL"
+[ -z "$CCHANCE" ] || set_env BARMAN_COMMENT_CHANCE "$CCHANCE"
+[ -z "$CCOOL" ] || set_env BARMAN_COMMENT_COOLDOWN_MIN "$CCOOL"
 if [ -n "$SOUL_FILE" ]; then
   ssh -i "$KEY" "root@$IP" "cat > $DATA/SOUL.md" < "$SOUL_FILE"
   rm -f "$SOUL_FILE"
