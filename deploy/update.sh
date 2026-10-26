@@ -9,6 +9,7 @@
 #   platforms.discord.extra.allow_admin_from / group_allow_admin_from = 0 — админов нет, поэтому служебные
 #   /-команды Hermes (/model, /update, /restart…) не работают ни у кого, кроме безобидных /help и /whoami;
 #   platforms.discord.extra.dm_policy = disabled — личка выключена.
+# model.default = BARMAN_AI_MODEL — модель OpenRouter для разговора (только если передан).
 # SOUL.md = persona/SOUL.<BARMAN_SOUL>.md с эмодзи из BARMAN_EMOJI («peka=ID,…») — только если BARMAN_SOUL передан.
 #   BARMAN_ROLES_CHANNEL, BARMAN_DIGEST_CHANNEL, BARMAN_DIGEST_USER, BARMAN_DIGEST_MODEL — только если переданы
 #   (канал ролей; канал, кого упомянуть и модель ИИ для ежедневной выжимки DTF; BARMAN_DIGEST_CHANNEL=off — выключить).
@@ -26,11 +27,12 @@ AIUSERS="${BARMAN_AI_USERS:-}"
 AICH="${BARMAN_AI_CHANNELS:-}"
 SOUL="${BARMAN_SOUL:-}"
 EMOJI="${BARMAN_EMOJI:-}"
+AIMODEL="${BARMAN_AI_MODEL:-}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 case "$CH" in *[!0-9]*) echo "BARMAN_ROLES_CHANNEL — число (ID канала)"; exit 1 ;; esac
 case "$DCH" in off) ;; *[!0-9]*) echo "BARMAN_DIGEST_CHANNEL — ID канала или off"; exit 1 ;; esac
 case "$DUSER" in *[!A-Za-z0-9_.]*) echo "BARMAN_DIGEST_USER — имя пользователя Discord (буквы, цифры, _ .)"; exit 1 ;; esac
-case "$DMODEL" in *[!A-Za-z0-9_.:/-]*) echo "BARMAN_DIGEST_MODEL — id модели OpenRouter"; exit 1 ;; esac
+case "$DMODEL$AIMODEL" in *[!A-Za-z0-9_.:/-]*) echo "BARMAN_DIGEST_MODEL / BARMAN_AI_MODEL — id модели OpenRouter"; exit 1 ;; esac
 case "$AIUSERS$AICH" in *[!0-9,]*) echo "BARMAN_AI_USERS / BARMAN_AI_CHANNELS — ID через запятую"; exit 1 ;; esac
 case "$SOUL" in *[!a-z0-9_-]*) echo "BARMAN_SOUL — имя личности из persona/ (например sibiya)"; exit 1 ;; esac
 SOUL_FILE=""
@@ -51,6 +53,7 @@ ssh -i "$KEY" "root@$IP" "docker start barmen >/dev/null"  # hermes config ра�
 hermes_set platforms.discord.extra.allow_admin_from 0
 hermes_set platforms.discord.extra.group_allow_admin_from 0
 hermes_set platforms.discord.extra.dm_policy disabled
+[ -z "$AIMODEL" ] || { hermes_set model.default "$AIMODEL"; echo "Модель разговора: $AIMODEL"; }
 set_env DISCORD_COMMAND_SYNC_POLICY off
 set_env DISCORD_ALLOWED_ROLES ""
 set_env DISCORD_ALLOWED_USERS "${AIUSERS:-0}"
