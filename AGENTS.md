@@ -29,7 +29,7 @@ barman/
 tests/               pytest, без сети и без discord.py
 deploy/update.sh     выкатка на сервер
 deploy/render_soul.py сборка SOUL.md: заглушки эмодзи → <:имя:ID>
-persona/            личности бармена (SOUL.sibiya.md — сейчас, SOUL.fidel.md — запасная)
+persona/            личности бармена: SOUL.sibiya.md, SOUL.fidel.md, SOUL.angmar.md
 ```
 
 ## Разработка
@@ -47,7 +47,7 @@ persona/            личности бармена (SOUL.sibiya.md — сейч
 - Служебные команды Hermes (`/model`, `/update`, `/restart`, навыки…) закрыты для всех, даже для пущенных к разговору: в `config.yaml` `platforms.discord.extra.allow_admin_from` и `group_allow_admin_from` = `0` (админов нет) — остаются только `/help` и `/whoami`. Личка выключена: `dm_policy: disabled`. Выкатка ставит эти замки через `hermes config set`, проверяет их и только потом открывает доступ; не встали — стоп.
 - Отвечает прямо в канале, без веток (`DISCORD_AUTO_THREAD=false`), и в ветках тоже только по упоминанию (`DISCORD_THREAD_REQUIRE_MENTION=true`, иначе в ветке Hermes отвечает на всё подряд), реплаем на сообщение того, кто обратился — пингуется только он (`DISCORD_REPLY_TO_MODE=first`, пинги @user/@role/@everyone в тексте ответа выключены). Домашнего канала нет (`DISCORD_HOME_CHANNEL=0`): служебные сообщения Hermes никуда не уходят, подсказки «/sethome» нет. Дописали, пока он думает, — отвечает отдельно, без служебных плашек (`display.busy_input_mode: queue`, `HERMES_GATEWAY_BUSY_ACK_ENABLED=false`).
 - Инструментов у ИИ в Discord нет (`platform_toolsets.discord: []`) — не включать: с инструментом ИИ дотянется до `.env` с ключами.
-- Личность — `persona/SOUL.<имя>.md`, выбирается секретом `BARMAN_SOUL` (сейчас `sibiya`). Эмодзи сервера в личности — заглушки `{{emoji:peka}}`; выкатка подставляет `<:peka:ID>` из секрета `BARMAN_EMOJI` (`peka=ID,neponi=ID,…`), ID в репо не кладём (`deploy/render_soul.py`).
+- Личность — `persona/SOUL.<имя>.md` (`sibiya`, `fidel`, `angmar`), выбирается секретом `BARMAN_SOUL`. Переключить: `gh secret set BARMAN_SOUL --body fidel` и Actions → deploy → Run workflow. Новая личность — новый файл в `persona/` с теми же неизменными правилами (их проверяет тест) и эмодзи только заглушками. Эмодзи сервера в личности — заглушки `{{emoji:peka}}`; выкатка подставляет `<:peka:ID>` из секрета `BARMAN_EMOJI` (`peka=ID,neponi=ID,…`), ID в репо не кладём (`deploy/render_soul.py`).
 - Секреты только в `.env` профиля на сервере. В репозитории (он публичный) — никаких токенов, ID и ключей.
 
 ## Известные ограничения (приняты для маленького сервера)
