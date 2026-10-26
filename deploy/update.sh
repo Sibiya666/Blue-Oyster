@@ -13,7 +13,8 @@
 #   (DISCORD_AUTO_THREAD=false; в ветках тоже только по упоминанию — DISCORD_THREAD_REQUIRE_MENTION=true;
 #   DISCORD_REPLY_TO_MODE=first, пинги @user/@role/@everyone из текста ответа выключены);
 #   DISCORD_HOME_CHANNEL=0 — «домашнего» канала нет: служебные сообщения Hermes (перезапуск, cron) никуда не уходят,
-#   и нет подсказки «введите /sethome».
+#   и нет подсказки «введите /sethome»; display.busy_input_mode=queue и HERMES_GATEWAY_BUSY_ACK_ENABLED=false —
+#   если дописали, пока бармен думает, он ответит отдельно и без служебных плашек.
 # model.default = BARMAN_AI_MODEL — модель OpenRouter для разговора (только если передан).
 # SOUL.md = persona/SOUL.<BARMAN_SOUL>.md с эмодзи из BARMAN_EMOJI («peka=ID,…») — только если BARMAN_SOUL передан.
 #   BARMAN_ROLES_CHANNEL, BARMAN_DIGEST_CHANNEL, BARMAN_DIGEST_USER, BARMAN_DIGEST_MODEL — только если переданы
@@ -58,6 +59,7 @@ ssh -i "$KEY" "root@$IP" "docker start barmen >/dev/null"  # hermes config ра�
 hermes_set platforms.discord.extra.allow_admin_from 0
 hermes_set platforms.discord.extra.group_allow_admin_from 0
 hermes_set platforms.discord.extra.dm_policy disabled
+hermes_set display.busy_input_mode queue  # дописал, пока бармен думает — отдельный ответ, без «перенаправил запуск»
 [ -z "$AIMODEL" ] || { hermes_set model.default "$AIMODEL"; echo "Модель разговора: $AIMODEL"; }
 set_env DISCORD_COMMAND_SYNC_POLICY off
 set_env DISCORD_AUTO_THREAD false
@@ -68,6 +70,7 @@ set_env DISCORD_ALLOW_MENTION_ROLES false
 set_env DISCORD_ALLOW_MENTION_USERS false
 set_env DISCORD_ALLOW_MENTION_REPLIED_USER true
 set_env DISCORD_HOME_CHANNEL 0
+set_env HERMES_GATEWAY_BUSY_ACK_ENABLED false  # без служебных «⚡ прерываю…» в чате
 set_env DISCORD_ALLOWED_ROLES ""
 set_env DISCORD_ALLOWED_USERS "${AIUSERS:-0}"
 [ -z "$AICH" ] || set_env DISCORD_ALLOWED_CHANNELS "$AICH"
