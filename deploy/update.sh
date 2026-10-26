@@ -10,7 +10,8 @@
 #   /-команды Hermes (/model, /update, /restart…) не работают ни у кого, кроме безобидных /help и /whoami;
 #   platforms.discord.extra.dm_policy = disabled — личка выключена.
 # Как отвечает в Discord (всегда): без веток, прямо в канале реплаем на сообщение — пингуется только автор
-#   (DISCORD_AUTO_THREAD=false, DISCORD_REPLY_TO_MODE=first, пинги @user/@role/@everyone из текста ответа выключены);
+#   (DISCORD_AUTO_THREAD=false; в ветках тоже только по упоминанию — DISCORD_THREAD_REQUIRE_MENTION=true;
+#   DISCORD_REPLY_TO_MODE=first, пинги @user/@role/@everyone из текста ответа выключены);
 #   DISCORD_HOME_CHANNEL=0 — «домашнего» канала нет: служебные сообщения Hermes (перезапуск, cron) никуда не уходят,
 #   и нет подсказки «введите /sethome».
 # model.default = BARMAN_AI_MODEL — модель OpenRouter для разговора (только если передан).
@@ -60,6 +61,7 @@ hermes_set platforms.discord.extra.dm_policy disabled
 [ -z "$AIMODEL" ] || { hermes_set model.default "$AIMODEL"; echo "Модель разговора: $AIMODEL"; }
 set_env DISCORD_COMMAND_SYNC_POLICY off
 set_env DISCORD_AUTO_THREAD false
+set_env DISCORD_THREAD_REQUIRE_MENTION true
 set_env DISCORD_REPLY_TO_MODE first
 set_env DISCORD_ALLOW_MENTION_EVERYONE false
 set_env DISCORD_ALLOW_MENTION_ROLES false
