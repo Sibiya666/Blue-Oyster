@@ -75,7 +75,7 @@ set_env() {  # заменить строку KEY=... в .env или дописа
   ssh -i "$KEY" "root@$IP" "f=$DATA/.env; if grep -q '^$1=' \$f; then sed -i 's|^$1=.*|$1=$2|' \$f; else echo $1=$2 >> \$f; fi"
 }
 if [ -n "$TOKEN" ]; then  # токен через stdin: не светится в командной строке и логах
-  printf '%s' "$TOKEN" | ssh -i "$KEY" "root@$IP" "t=\$(cat); f=$DATA/.env; grep -v '^DISCORD_BOT_TOKEN=' \$f > \$f.new; echo DISCORD_BOT_TOKEN=\$t >> \$f.new; mv \$f.new \$f; chmod 600 \$f"
+  printf '%s' "$TOKEN" | ssh -i "$KEY" "root@$IP" "t=\$(cat); f=$DATA/.env; grep -v '^DISCORD_BOT_TOKEN=' \$f > \$f.new; echo DISCORD_BOT_TOKEN=\$t >> \$f.new; mv \$f.new \$f; chmod 600 \$f; chown 10000:10000 \$f"  # .env читает Hermes под uid 10000
 fi
 ssh -i "$KEY" "root@$IP" "docker inspect $CT >/dev/null 2>&1 || docker run -d --name $CT --memory 768m --restart unless-stopped -v $DATA:/opt/data \$(docker inspect barmen --format '{{.Image}}') gateway run >/dev/null"
 hermes_set() {  # замок в config.yaml Hermes + проверка, что он встал (иначе доступ не открываем)
