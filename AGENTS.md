@@ -25,6 +25,7 @@ barman/
   __init__.py        register(ctx): слушатели реакций и команды Discord (discord.py внутри Hermes)
   reaction_roles.py  чистая логика: привязки, проверки, синхронизация команд — без импорта discord
   digest.py          чистая логика ежедневной выжимки DTF: отбор, пересказ, расписание — без discord и сети
+  comments.py        чистая логика редких реплик на сообщения завсегдатаев — без discord и сети
   plugin.yaml        манифест плагина (kind: standalone)
 tests/               pytest, без сети и без discord.py
 deploy/update.sh     выкатка на сервер
@@ -46,6 +47,7 @@ persona/            личности бармена (SOUL.sibiya.md — сейч
 - ИИ бармена (Hermes) разговаривает только с теми, кто в `DISCORD_ALLOWED_USERS` (секрет `BARMAN_AI_USERS`, ID через запятую; нет секрета — `0`, ни с кем), только в `DISCORD_ALLOWED_CHANNELS` (секрет `BARMAN_AI_CHANNELS`) и только по упоминанию. Без списка пользователей Hermes пускает всех из `DISCORD_ALLOWED_CHANNELS` — поэтому `0`, а не пусто.
 - Служебные команды Hermes (`/model`, `/update`, `/restart`, навыки…) закрыты для всех, даже для пущенных к разговору: в `config.yaml` `platforms.discord.extra.allow_admin_from` и `group_allow_admin_from` = `0` (админов нет) — остаются только `/help` и `/whoami`. Личка выключена: `dm_policy: disabled`. Выкатка ставит эти замки через `hermes config set`, проверяет их и только потом открывает доступ; не встали — стоп.
 - Отвечает прямо в канале, без веток (`DISCORD_AUTO_THREAD=false`), и в ветках тоже только по упоминанию (`DISCORD_THREAD_REQUIRE_MENTION=true`, иначе в ветке Hermes отвечает на всё подряд), реплаем на сообщение того, кто обратился — пингуется только он (`DISCORD_REPLY_TO_MODE=first`, пинги @user/@role/@everyone в тексте ответа выключены). Домашнего канала нет (`DISCORD_HOME_CHANNEL=0`): служебные сообщения Hermes никуда не уходят, подсказки «/sethome» нет. Дописали, пока он думает, — отвечает отдельно, без служебных плашек (`display.busy_input_mode: queue`, `HERMES_GATEWAY_BUSY_ACK_ENABLED=false`).
+- Реплики без обращения (`barman/comments.py`, не Hermes): на сообщения людей из секрета `BARMAN_COMMENT_USERS` в канале `BARMAN_AI_CHANNELS` бармен изредка отвечает одной фразой — шанс `BARMAN_COMMENT_CHANCE` (0.1), не чаще раза в `BARMAN_COMMENT_COOLDOWN_MIN` (60) минут, реплаем без пинга, голосом из `SOUL.md`; модель — `BARMAN_AI_MODEL`. Не реагирует на обращения к себе (их отвечает Hermes), ссылки, команды и короткое; модель может промолчать (SKIP). Нет секрета — выключено.
 - Инструментов у ИИ в Discord нет (`platform_toolsets.discord: []`) — не включать: с инструментом ИИ дотянется до `.env` с ключами.
 - Личность — `persona/SOUL.<имя>.md`, выбирается секретом `BARMAN_SOUL` (сейчас `sibiya`). Эмодзи сервера в личности — заглушки `{{emoji:peka}}`; выкатка подставляет `<:peka:ID>` из секрета `BARMAN_EMOJI` (`peka=ID,neponi=ID,…`), ID в репо не кладём (`deploy/render_soul.py`).
 - Секреты только в `.env` профиля на сервере. В репозитории (он публичный) — никаких токенов, ID и ключей.

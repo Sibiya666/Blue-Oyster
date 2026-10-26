@@ -45,6 +45,9 @@ jobs:
       BARMAN_SOUL: ${{ secrets.BARMAN_SOUL }}
       BARMAN_EMOJI: ${{ secrets.BARMAN_EMOJI }}
       BARMAN_AI_MODEL: ${{ secrets.BARMAN_AI_MODEL }}
+      BARMAN_COMMENT_USERS: ${{ secrets.BARMAN_COMMENT_USERS }}  # необязательные: реплики без обращения
+      BARMAN_COMMENT_CHANCE: ${{ secrets.BARMAN_COMMENT_CHANCE }}
+      BARMAN_COMMENT_COOLDOWN_MIN: ${{ secrets.BARMAN_COMMENT_COOLDOWN_MIN }}
     steps:
       - uses: actions/checkout@v4
       - name: Выкатка на VPS
