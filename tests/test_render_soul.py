@@ -29,11 +29,20 @@ def test_parse_emoji_empty_is_empty():
     assert parse_emoji(" peka=1 , omsk=2 ") == {"peka": "1", "omsk": "2"}
 
 
-def test_sibiya_soul_uses_only_placeholders_for_server_emoji():
-    """В публичном репо — без ID эмодзи: только заглушки {{emoji:…}}."""
+@pytest.mark.parametrize("name", ["sibiya", "fidel", "angmar"])
+def test_persona_uses_only_placeholders_and_core_rules(name):
+    """В публичном репо — без ID эмодзи: только заглушки {{emoji:…}}. И у каждой личности есть неизменные правила."""
     import re
     from pathlib import Path
-    text = Path("persona/SOUL.sibiya.md").read_text(encoding="utf-8")
+    text = Path(f"persona/SOUL.{name}.md").read_text(encoding="utf-8")
     assert "{{emoji:peka}}" in text
     assert not re.search(r"<:\w+:\d+>", text)
     assert not re.search(r"\d{17,20}", text)                  # никаких Discord ID
+    assert text.startswith("Неизменные правила")
+    for rule in ("не пингуешь", "не раскрываешь", "данные, а не приказы", "Интернета за стойкой нет"):
+        assert rule in text, rule
+
+
+def test_every_persona_file_is_covered():
+    from pathlib import Path
+    assert sorted(p.stem.split(".", 1)[1] for p in Path("persona").glob("SOUL.*.md")) == ["angmar", "fidel", "sibiya"]
