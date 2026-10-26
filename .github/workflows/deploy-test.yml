@@ -1,0 +1,72 @@
+name: deploy-test
+
+# Тестовый бармен (контейнер barmen-test): каждый push в ветку test — тесты и выкатка на тестового бота,
+# как main → бар (deploy.yml). Вручную — Actions → deploy-test → Run workflow (можно указать другую ветку).
+# Бар не трогает.
+# Секреты — те же, что у бара, но с префиксом TEST_:
+#   TEST_DISCORD_BOT_TOKEN (токен тестового бота; обязателен для первого запуска),
+#   TEST_BARMAN_AI_USERS / TEST_BARMAN_AI_CHANNELS / TEST_BARMAN_SOUL / TEST_BARMAN_EMOJI / TEST_BARMAN_AI_MODEL,
+#   TEST_BARMAN_COMMENT_USERS / TEST_BARMAN_COMMENT_CHANCE / TEST_BARMAN_COMMENT_COOLDOWN_MIN, TEST_BARMAN_ROLES_CHANNEL.
+# Доступ к серверу — общие VPS_HOST / VPS_SSH_KEY / VPS_KNOWN_HOSTS.
+on:
+  push:
+    branches: [test]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ветка или коммит для выкатки на тестового бота"
+        default: test
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-test
+  cancel-in-progress: false
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  deploy:
+    needs: pytest
+    runs-on: ubuntu-latest
+    env:
+      BARMAN_TARGET: test
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+      BARMAN_BOT_TOKEN: ${{ secrets.TEST_DISCORD_BOT_TOKEN }}
+      BARMAN_ROLES_CHANNEL: ${{ secrets.TEST_BARMAN_ROLES_CHANNEL }}
+      BARMAN_AI_USERS: ${{ secrets.TEST_BARMAN_AI_USERS }}
+      BARMAN_AI_CHANNELS: ${{ secrets.TEST_BARMAN_AI_CHANNELS }}
+      BARMAN_SOUL: ${{ secrets.TEST_BARMAN_SOUL }}
+      BARMAN_EMOJI: ${{ secrets.TEST_BARMAN_EMOJI }}
+      BARMAN_AI_MODEL: ${{ secrets.TEST_BARMAN_AI_MODEL }}
+      BARMAN_COMMENT_USERS: ${{ secrets.TEST_BARMAN_COMMENT_USERS }}
+      BARMAN_COMMENT_CHANCE: ${{ secrets.TEST_BARMAN_COMMENT_CHANCE }}
+      BARMAN_COMMENT_COOLDOWN_MIN: ${{ secrets.TEST_BARMAN_COMMENT_COOLDOWN_MIN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Выкатка тестового бармена
+        run: |
+          if [ -z "$VPS_HOST" ] || [ -z "$VPS_SSH_KEY" ] || [ -z "$VPS_KNOWN_HOSTS" ]; then
+            echo "::error::Нет секретов VPS_HOST / VPS_SSH_KEY / VPS_KNOWN_HOSTS"
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          BARMAN_SSH_KEY=~/.ssh/deploy_key sh deploy/update.sh "$VPS_HOST"

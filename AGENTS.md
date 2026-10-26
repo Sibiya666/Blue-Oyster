@@ -28,7 +28,7 @@ barman/
   comments.py        чистая логика редких реплик на сообщения завсегдатаев — без discord и сети
   plugin.yaml        манифест плагина (kind: standalone)
 tests/               pytest, без сети и без discord.py
-deploy/update.sh     выкатка на сервер
+deploy/update.sh     выкатка на сервер (BARMAN_TARGET=prod — бар, test — тестовый бот)
 deploy/render_soul.py сборка SOUL.md: заглушки эмодзи → <:имя:ID>
 persona/            личности бармена: SOUL.sibiya.md, SOUL.fidel.md, SOUL.angmar.md
 ```
@@ -69,13 +69,20 @@ persona/            личности бармена: SOUL.sibiya.md, SOUL.fidel.
 - **Свои PR владелец вливает сам** в обход апрува (одобрить собственный PR GitHub не даёт): кнопка «Merge without waiting for requirements» или `gh pr merge <N> --admin --squash`. Тесты этим не обойти — `main` требует зелёный `pytest` и от админа.
 - **ИИ-агенты PR не вливают** (ни `--admin`, ни `--auto`): создают PR, доводят до зелёных тестов и сообщают владельцу номер PR.
 
+## Две ветки: test и main
+
+- **`test` → тестовый бот** (`barmen-test`, секреты `TEST_*`): каждый push в `test` выкатывает тестового бота. **`main` → бармен «Паба»**.
+- Порядок: ветка фичи от свежего **`test`** → PR в `test` (squash) → проверка вживую на тестовом сервере → **PR `test` → `main`**.
+- PR `test` → `main` вливается **обычным merge, без squash** (`gh pr merge <N> --admin --merge`): иначе истории разойдутся и следующий PR из `test` снова покажет уже влитое и даст конфликты.
+- Срочная правка прямо в `main` (мимо теста) — после мержа сразу влить `main` обратно в `test` (`git switch test && git merge origin/main && git push`), чтобы тест не отставал.
+
 ## Как изменение попадает в main
 
 1. Локально: ревью пройдено, все замечания исправлены, `.venv/bin/pytest -q` зелёный.
-2. `gh pr create --fill` — PR в `main` (без автомержа: с обязательным апрувом он всё равно не сработает).
+2. `gh pr create --fill --base test` — PR в `test`; проверили на тестовом боте — `gh pr create --base main --head test` (без автомержа: с обязательным апрувом он всё равно не сработает).
 3. GitHub Actions гоняет `pytest` на PR (`.github/workflows/tests.yml`). Красный — чинить в той же ветке.
 4. Конфликт с `main`: `git fetch && git merge origin/main`, поправить, `pytest`, push.
-5. Владелец вливает PR (`gh pr merge <N> --admin --squash` или кнопкой). Ветка на GitHub удаляется сама.
+5. Владелец вливает PR: фичу в `test` — `--squash`, `test` в `main` — `--merge` (или кнопкой с тем же способом). Ветка фичи на GitHub удаляется сама; `test` — нет: её защищает ruleset «test: не удалять и не перезаписывать» (нельзя удалить и force-push; обычные push и PR — можно).
 6. После мержа GitHub сам выкатывает на VPS (`.github/workflows/deploy.yml`: тесты → `deploy/update.sh`). Руками — только `deploy/update.sh <IP>` из свежего `main`.
 
 ## Неснимаемые правила
@@ -89,6 +96,7 @@ persona/            личности бармена: SOUL.sibiya.md, SOUL.fidel.
 - Прод: VPS (IP знает владелец, в публичный репо не писать). Отдельный Docker-контейнер **`barmen`** (образ `nousresearch/hermes-agent`, `--memory 768m`, `restart unless-stopped`), данные — `/root/barmen-hermes` → `/opt/data` (владелец uid **10000**). На том же сервере в своём контейнере `hermes` живут другие боты — их не трогать.
 - Вход: `ssh -i ~/.ssh/companion_vps root@<IP>`.
 - Выкатка: `deploy/update.sh <IP>` — rsync плагина в `/root/barmen-hermes/plugins/barman` и `docker restart barmen`.
+- **Тестовый бармен** — отдельный бот (своё приложение Discord и токен), контейнер `barmen-test`, данные `/root/barmen-test-hermes`. Выкатывается из ветки **`test`**: каждый push в неё — тесты и выкатка на тестового бота (`.github/workflows/deploy-test.yml`), как `main` → бар. Вручную — Actions → **deploy-test** → Run workflow. Настройки — те же секреты с префиксом `TEST_` (`TEST_DISCORD_BOT_TOKEN`, `TEST_BARMAN_AI_USERS`, `TEST_BARMAN_AI_CHANNELS`, `TEST_BARMAN_SOUL`, …). Первая выкатка создаёт его сама: `config.yaml` и ключ OpenRouter копируются с бара на сервере, токен — из `TEST_DISCORD_BOT_TOKEN`. Те же замки Hermes, что у бара. `update.sh` выбирает цель по `BARMAN_TARGET` (`prod` | `test`).
 - Автовыкатка: после каждого мержа в `main` (и вручную — Actions → deploy → Run workflow). Секреты репозитория: `VPS_HOST`, `VPS_SSH_KEY` (отдельный deploy-ключ, не `companion_vps`), `VPS_KNOWN_HOSTS`. Без них выкатка пропускается с предупреждением.
 - Выкатка сама выставляет замки Hermes: в `.env` `DISCORD_COMMAND_SYNC_POLICY=off`, `DISCORD_ALLOWED_ROLES=`, `DISCORD_ALLOWED_USERS` из `BARMAN_AI_USERS` (иначе `0`); в `config.yaml` — админов нет, личка выключена (см. `deploy/update.sh`). Секреты ИИ: `BARMAN_AI_USERS`, `BARMAN_AI_CHANNELS`, `BARMAN_SOUL`, `BARMAN_EMOJI`, `BARMAN_AI_MODEL` (модель разговора в OpenRouter, ставится в `model.default`; сейчас `anthropic/claude-haiku-5.5` — дешёвая; дорогие модели не ставить без нужды: каждое упоминание бармена — запрос).
 - Выжимка DTF: секреты `BARMAN_DIGEST_CHANNEL` (ID канала), `BARMAN_DIGEST_USER` (имя пользователя Discord без @, бот находит его на сервере сам), `BARMAN_DIGEST_MODEL` (необязательно). Выключить, не удаляя код: секрет `BARMAN_DIGEST_CHANNEL=off` + deploy (канал в `.env` очищается, в логе «DTF digest disabled»); включить — вернуть ID канала. **Сейчас выключена.** Ключ ИИ — `OPENROUTER_API_KEY` из `.env`.
