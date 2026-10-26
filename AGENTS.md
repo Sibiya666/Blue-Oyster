@@ -28,6 +28,8 @@ barman/
   plugin.yaml        манифест плагина (kind: standalone)
 tests/               pytest, без сети и без discord.py
 deploy/update.sh     выкатка на сервер
+deploy/render_soul.py сборка SOUL.md: заглушки эмодзи → <:имя:ID>
+persona/            личности бармена (SOUL.sibiya.md — сейчас, SOUL.fidel.md — запасная)
 ```
 
 ## Разработка
@@ -41,7 +43,10 @@ deploy/update.sh     выкатка на сервер
 - Импорты внутри плагина — **только относительные** (`from .reaction_roles import …`): Hermes грузит папку как `hermes_plugins.barman`.
 - `discord` импортируется только внутри фабрики (его даёт Hermes). Модуль под `from __future__ import annotations`, поэтому тип параметра контекстного меню задаётся объектом (`callback.__annotations__[...] = discord.Message`).
 - В Discord у бота только команды бармена (`/роли`, `/синк`, «Привязать/Отвязать роль»). Hermes свои команды не регистрирует (`DISCORD_COMMAND_SYNC_POLICY=off`), а бармен при старте (`sync_app_commands`) перезаписывает список своими, если там есть чужие, иначе досылает недостающие по одной. Массовый `tree.sync()` не использовать — он зальёт ~70 команд Hermes.
-- Hermes (ИИ, его команды, ответы в личке) закрыт для всех: `DISCORD_ALLOWED_USERS=0`, `DISCORD_ALLOWED_ROLES=` пусто. Без списка пользователей Hermes пускает всех из `DISCORD_ALLOWED_CHANNELS` — не убирать.
+- ИИ бармена (Hermes) разговаривает только с теми, кто в `DISCORD_ALLOWED_USERS` (секрет `BARMAN_AI_USERS`, ID через запятую; нет секрета — `0`, ни с кем), только в `DISCORD_ALLOWED_CHANNELS` (секрет `BARMAN_AI_CHANNELS`) и только по упоминанию. Без списка пользователей Hermes пускает всех из `DISCORD_ALLOWED_CHANNELS` — поэтому `0`, а не пусто.
+- Служебные команды Hermes (`/model`, `/update`, `/restart`, навыки…) закрыты для всех, даже для пущенных к разговору: в `config.yaml` `platforms.discord.extra.allow_admin_from` и `group_allow_admin_from` = `0` (админов нет) — остаются только `/help` и `/whoami`. Личка выключена: `dm_policy: disabled`. Выкатка ставит эти замки через `hermes config set`, проверяет их и только потом открывает доступ; не встали — стоп.
+- Инструментов у ИИ в Discord нет (`platform_toolsets.discord: []`) — не включать: с инструментом ИИ дотянется до `.env` с ключами.
+- Личность — `persona/SOUL.<имя>.md`, выбирается секретом `BARMAN_SOUL` (сейчас `sibiya`). Эмодзи сервера в личности — заглушки `{{emoji:peka}}`; выкатка подставляет `<:peka:ID>` из секрета `BARMAN_EMOJI` (`peka=ID,neponi=ID,…`), ID в репо не кладём (`deploy/render_soul.py`).
 - Секреты только в `.env` профиля на сервере. В репозитории (он публичный) — никаких токенов, ID и ключей.
 
 ## Известные ограничения (приняты для маленького сервера)
@@ -82,7 +87,7 @@ deploy/update.sh     выкатка на сервер
 - Вход: `ssh -i ~/.ssh/companion_vps root@<IP>`.
 - Выкатка: `deploy/update.sh <IP>` — rsync плагина в `/root/barmen-hermes/plugins/barman` и `docker restart barmen`.
 - Автовыкатка: после каждого мержа в `main` (и вручную — Actions → deploy → Run workflow). Секреты репозитория: `VPS_HOST`, `VPS_SSH_KEY` (отдельный deploy-ключ, не `companion_vps`), `VPS_KNOWN_HOSTS`. Без них выкатка пропускается с предупреждением.
-- Выкатка сама выставляет в `.env` замки Hermes: `DISCORD_COMMAND_SYNC_POLICY=off`, `DISCORD_ALLOWED_USERS=0`, `DISCORD_ALLOWED_ROLES=` (см. `deploy/update.sh`).
+- Выкатка сама выставляет замки Hermes: в `.env` `DISCORD_COMMAND_SYNC_POLICY=off`, `DISCORD_ALLOWED_ROLES=`, `DISCORD_ALLOWED_USERS` из `BARMAN_AI_USERS` (иначе `0`); в `config.yaml` — админов нет, личка выключена (см. `deploy/update.sh`). Секреты ИИ: `BARMAN_AI_USERS`, `BARMAN_AI_CHANNELS`, `BARMAN_SOUL`, `BARMAN_EMOJI`.
 - Выжимка DTF: секреты `BARMAN_DIGEST_CHANNEL` (ID канала), `BARMAN_DIGEST_USER` (имя пользователя Discord без @, бот находит его на сервере сам), `BARMAN_DIGEST_MODEL` (необязательно). Выключить, не удаляя код: секрет `BARMAN_DIGEST_CHANNEL=off` + deploy (канал в `.env` очищается, в логе «DTF digest disabled»); включить — вернуть ID канала. **Сейчас выключена.** Ключ ИИ — `OPENROUTER_API_KEY` из `.env`.
 - Канал ролей: секрет `BARMAN_ROLES_CHANNEL` (ID канала). Выкатка вписывает его в `.env` на сервере — сменить канал = поменять секрет и запустить deploy. Секрета нет — `.env` не трогается.
 - Команды в контейнере — только `docker exec -u 10000 barmen …` (от root появляются root-файлы и бот ломается).

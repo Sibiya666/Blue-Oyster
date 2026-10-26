@@ -3,7 +3,8 @@ name: deploy
 # После мержа в main: тесты, затем выкатка на VPS (deploy/update.sh).
 # Секреты репозитория: VPS_HOST (IP), VPS_SSH_KEY (приватный deploy-ключ), VPS_KNOWN_HOSTS (ssh-keyscan сервера),
 # BARMAN_ROLES_CHANNEL (необязательно: ID канала ролей — вписывается в .env на сервере),
-# BARMAN_DIGEST_CHANNEL / BARMAN_DIGEST_USER / BARMAN_DIGEST_MODEL (необязательно: ежедневная выжимка DTF).
+# BARMAN_DIGEST_CHANNEL / BARMAN_DIGEST_USER / BARMAN_DIGEST_MODEL (необязательно: ежедневная выжимка DTF),
+# BARMAN_AI_USERS / BARMAN_AI_CHANNELS / BARMAN_SOUL / BARMAN_EMOJI (необязательно: с кем, где и каким голосом говорит ИИ).
 # Пока секретов нет — выкатка пропускается, а не падает.
 on:
   push:
@@ -39,6 +40,10 @@ jobs:
       BARMAN_DIGEST_CHANNEL: ${{ secrets.BARMAN_DIGEST_CHANNEL }}  # необязательные: выжимка DTF
       BARMAN_DIGEST_USER: ${{ secrets.BARMAN_DIGEST_USER }}
       BARMAN_DIGEST_MODEL: ${{ secrets.BARMAN_DIGEST_MODEL }}
+      BARMAN_AI_USERS: ${{ secrets.BARMAN_AI_USERS }}  # необязательные: разговор с ИИ бармена
+      BARMAN_AI_CHANNELS: ${{ secrets.BARMAN_AI_CHANNELS }}
+      BARMAN_SOUL: ${{ secrets.BARMAN_SOUL }}
+      BARMAN_EMOJI: ${{ secrets.BARMAN_EMOJI }}
     steps:
       - uses: actions/checkout@v4
       - name: Выкатка на VPS
