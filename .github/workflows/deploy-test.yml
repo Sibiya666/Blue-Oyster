@@ -1,18 +1,21 @@
 name: deploy-test
 
-# Тестовый бармен (контейнер barmen-test): запускается только вручную — Actions → deploy-test → Run workflow,
-# можно выбрать ветку, чтобы проверить код до мержа в main. Бар (deploy.yml) не трогает.
+# Тестовый бармен (контейнер barmen-test): каждый push в ветку test — тесты и выкатка на тестового бота,
+# как main → бар (deploy.yml). Вручную — Actions → deploy-test → Run workflow (можно указать другую ветку).
+# Бар не трогает.
 # Секреты — те же, что у бара, но с префиксом TEST_:
 #   TEST_DISCORD_BOT_TOKEN (токен тестового бота; обязателен для первого запуска),
 #   TEST_BARMAN_AI_USERS / TEST_BARMAN_AI_CHANNELS / TEST_BARMAN_SOUL / TEST_BARMAN_EMOJI / TEST_BARMAN_AI_MODEL,
 #   TEST_BARMAN_COMMENT_USERS / TEST_BARMAN_COMMENT_CHANCE / TEST_BARMAN_COMMENT_COOLDOWN_MIN, TEST_BARMAN_ROLES_CHANNEL.
 # Доступ к серверу — общие VPS_HOST / VPS_SSH_KEY / VPS_KNOWN_HOSTS.
 on:
+  push:
+    branches: [test]
   workflow_dispatch:
     inputs:
       ref:
         description: "Ветка или коммит для выкатки на тестового бота"
-        default: main
+        default: test
         required: true
 
 permissions:
@@ -28,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -56,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref || github.ref }}
       - name: Выкатка тестового бармена
         run: |
           if [ -z "$VPS_HOST" ] || [ -z "$VPS_SSH_KEY" ] || [ -z "$VPS_KNOWN_HOSTS" ]; then
