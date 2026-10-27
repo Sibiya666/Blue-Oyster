@@ -31,7 +31,7 @@ def fake(tmp_path):
     b = tmp_path / "bin"
     b.mkdir()
     _exe(b / "ssh", '#!/bin/sh\nfor a; do last=$a; done; sh -c "$last"\n')
-    _exe(b / "rsync", "#!/bin/sh\nexit 0\n")
+    _exe(b / "rsync", '#!/bin/sh\necho "rsync $*" >> "$LOG"\n')
     _exe(b / "chown", '#!/bin/sh\necho "chown $*" >> "$LOG"\n')
     _exe(b / "docker", FAKE_DOCKER)
     real_sed = "/usr/bin/sed"
@@ -61,7 +61,7 @@ def test_test_bot_first_deploy_and_env_owner_after_token(fake):
     dotenv = (data / ".env").read_text()
     assert "DISCORD_BOT_TOKEN=abc.DEF_1-2" in dotenv and "PROD" not in dotenv and "OPENROUTER_API_KEY" in dotenv
     log = (tmp / "log").read_text().splitlines()
-    owner_fix = next(i for i, l in enumerate(log) if l == f"chown 10000:10000 {data}/.env")
+    owner_fix = next(i for i, l in enumerate(log) if l.startswith(f"chown 10000:10000 {data}/.env."))
     first_hermes = next(i for i, l in enumerate(log) if "hermes config" in l)
     assert owner_fix < first_hermes                     # Hermes (uid 10000) читает .env уже со своим владельцем
     assert any(l.startswith("docker run -d --name barmen-test") for l in log)
@@ -75,7 +75,7 @@ def test_redeploy_with_token_fixes_owner_again(fake):
     r = _run(env, BARMAN_TARGET="test", BARMAN_DATA=str(data), BARMAN_BOT_TOKEN="t2")
     assert r.returncode == 0, r.stdout + r.stderr
     log = (tmp / "log").read_text().splitlines()
-    assert f"chown 10000:10000 {data}/.env" in log
+    assert any(l.startswith(f"chown 10000:10000 {data}/.env.") for l in log)  # владелец ставится до mv
     assert not any(l.startswith("docker run") for l in log)  # контейнер уже есть — не пересоздаём
     assert "DISCORD_BOT_TOKEN=t2" in (data / ".env").read_text()
 
@@ -99,3 +99,67 @@ def test_rejects_garbage(fake, kw, msg):
     _, env = fake
     r = _run(env, **kw)
     assert r.returncode != 0 and msg in r.stdout + r.stderr
+
+
+# --- ловушки-ссылки: взломанный процесс бота (uid 10000) подкладывает ссылку, а выкатка пишет от root ---
+
+def _prod(fake):
+    tmp, env = fake
+    return tmp, env, Path(env["BARMAN_PROD_DATA"])
+
+
+@pytest.mark.parametrize("name", [".env", "SOUL.md", "config.yaml", "plugins", "plugins/barman"])
+def test_refuses_when_data_path_is_a_symlink(fake, name):
+    tmp, env, prod = _prod(fake)
+    victim = tmp / "root_secret"
+    victim.write_text("ROOT ONLY\n")
+    (prod / "plugins").mkdir(exist_ok=True)
+    link = prod / name
+    if link.exists() or link.is_symlink():
+        if link.is_dir() and not link.is_symlink():
+            link.rmdir()
+        else:
+            link.unlink()
+    link.symlink_to(victim)
+    r = _run(env, BARMAN_DATA=str(prod), BARMAN_SOUL="sibiya", BARMAN_AI_USERS="1")
+    assert r.returncode != 0 and "ссылка" in (r.stdout + r.stderr).lower(), r.stdout + r.stderr
+    assert victim.read_text() == "ROOT ONLY\n"                      # по ссылке ничего не записали
+    log = (tmp / "log").read_text() if (tmp / "log").exists() else ""
+    assert "rsync" not in log and "docker restart" not in log       # остановились до любых действий
+
+
+def test_writes_do_not_follow_planted_temp_files(fake):
+    """Старые фиксированные имена временных файлов (.env.new) не используются: подложенная ссылка не сработает."""
+    tmp, env = fake
+    data = tmp / "test"
+    assert _run(env, BARMAN_TARGET="test", BARMAN_DATA=str(data), BARMAN_BOT_TOKEN="t1").returncode == 0
+    victim = tmp / "root_secret"
+    victim.write_text("ROOT ONLY\n")
+    (data / ".env.new").symlink_to(victim)
+    r = _run(env, BARMAN_TARGET="test", BARMAN_DATA=str(data), BARMAN_BOT_TOKEN="t2", BARMAN_SOUL="angmar")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert victim.read_text() == "ROOT ONLY\n"
+    assert "DISCORD_BOT_TOKEN=t2" in (data / ".env").read_text()
+    assert not (data / ".env").is_symlink() and not (data / "SOUL.md").is_symlink()
+
+
+def test_env_and_soul_are_owned_by_bot_after_deploy(fake):
+    tmp, env, prod = _prod(fake)
+    r = _run(env, BARMAN_DATA=str(prod), BARMAN_SOUL="sibiya", BARMAN_AI_USERS="1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    log = (tmp / "log").read_text()
+    assert "rsync" in log and "--no-links" in log                    # код плагина копируем без ссылок
+    assert "chown 10000:10000" in log
+
+
+def test_test_bootstrap_refuses_symlinked_prod_files(fake):
+    """Первый запуск теста копирует config.yaml и ключ с бара — ссылка там не должна утащить чужой файл."""
+    tmp, env, prod = _prod(fake)
+    victim = tmp / "root_secret"
+    victim.write_text("OPENROUTER_API_KEY=stolen-root-file\n")
+    (prod / "config.yaml").unlink()
+    (prod / "config.yaml").symlink_to(victim)
+    data = tmp / "test"
+    r = _run(env, BARMAN_TARGET="test", BARMAN_DATA=str(data), BARMAN_BOT_TOKEN="t1")
+    assert r.returncode != 0 and "ссылка" in (r.stdout + r.stderr).lower()
+    assert not (data / "config.yaml").exists()
