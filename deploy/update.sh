@@ -68,14 +68,21 @@ if ! ssh -i "$KEY" "root@$IP" "test -d $DATA"; then
   [ "$TARGET" = test ] || { echo "Нет $DATA на сервере"; exit 1; }
   [ -n "$TOKEN" ] || { echo "Первый запуск теста: нужен BARMAN_BOT_TOKEN (токен тестового бота)"; exit 1; }
   echo "Создаю тестового бота: $DATA"
+  ssh -i "$KEY" "root@$IP" "for p in $PROD_DATA/config.yaml $PROD_DATA/.env; do [ -L \$p ] || [ ! -f \$p ] && exit 1; done; exit 0" \
+    || { echo "Ссылка или не обычный файл в $PROD_DATA (config.yaml/.env) — не копирую, выкатка остановлена"; exit 1; }
   ssh -i "$KEY" "root@$IP" "mkdir -p $DATA/plugins && cp $PROD_DATA/config.yaml $DATA/config.yaml && grep '^OPENROUTER_API_KEY=' $PROD_DATA/.env > $DATA/.env && chmod 600 $DATA/.env && chown -R 10000:10000 $DATA"
 fi
-rsync -a --delete --exclude '__pycache__' -e "ssh -i $KEY" "$REPO/barman/" "root@$IP:$DATA/plugins/barman/"
-set_env() {  # заменить строку KEY=... в .env или дописать, если её нет
-  ssh -i "$KEY" "root@$IP" "f=$DATA/.env; if grep -q '^$1=' \$f; then sed -i 's|^$1=.*|$1=$2|' \$f; else echo $1=$2 >> \$f; fi"
+# Выкатка пишет от root в папку, которую контролирует процесс бота (uid 10000). Если бот взломан и подложил
+# символическую ссылку вместо файла или папки, root записал бы по ней куда угодно. Поэтому: ссылка — стоп;
+# все записи — во временный файл (mktemp) с заменой через mv; код плагина копируется без ссылок.
+ssh -i "$KEY" "root@$IP" "[ -L $DATA ] && exit 1; for p in $DATA/.env $DATA/SOUL.md $DATA/config.yaml $DATA/plugins $DATA/plugins/barman; do [ -L \$p ] && exit 1; done; [ ! -e $DATA/.env ] || [ -f $DATA/.env ]" \
+  || { echo "Ссылка вместо файла или папки в $DATA (.env, SOUL.md, config.yaml, plugins) — выкатка остановлена, проверь сервер"; exit 1; }
+rsync -a --no-links --delete --exclude '__pycache__' -e "ssh -i $KEY" "$REPO/barman/" "root@$IP:$DATA/plugins/barman/"
+set_env() {  # KEY=... в .env: новый файл через mktemp, владелец — бот, затем mv поверх (по ссылкам не пишем)
+  ssh -i "$KEY" "root@$IP" "f=$DATA/.env; n=\$(mktemp $DATA/.env.XXXXXX) && { grep -v '^$1=' \$f 2>/dev/null; echo $1=$2; } > \$n && chmod 600 \$n && chown 10000:10000 \$n && mv -f \$n \$f"
 }
 if [ -n "$TOKEN" ]; then  # токен через stdin: не светится в командной строке и логах
-  printf '%s' "$TOKEN" | ssh -i "$KEY" "root@$IP" "t=\$(cat); f=$DATA/.env; grep -v '^DISCORD_BOT_TOKEN=' \$f > \$f.new; echo DISCORD_BOT_TOKEN=\$t >> \$f.new; mv \$f.new \$f; chmod 600 \$f; chown 10000:10000 \$f"  # .env читает Hermes под uid 10000
+  printf '%s' "$TOKEN" | ssh -i "$KEY" "root@$IP" "t=\$(cat); f=$DATA/.env; n=\$(mktemp $DATA/.env.XXXXXX) && { grep -v '^DISCORD_BOT_TOKEN=' \$f 2>/dev/null; echo DISCORD_BOT_TOKEN=\$t; } > \$n && chmod 600 \$n && chown 10000:10000 \$n && mv -f \$n \$f"  # .env читает Hermes под uid 10000
 fi
 ssh -i "$KEY" "root@$IP" "docker inspect $CT >/dev/null 2>&1 || docker run -d --name $CT --memory 768m --restart unless-stopped -v $DATA:/opt/data \$(docker inspect barmen --format '{{.Image}}') gateway run >/dev/null"
 hermes_set() {  # замок в config.yaml Hermes + проверка, что он встал (иначе доступ не открываем)
@@ -106,7 +113,7 @@ set_env BARMAN_COMMENT_USERS "${CUSERS:-0}"
 [ -z "$CCHANCE" ] || set_env BARMAN_COMMENT_CHANCE "$CCHANCE"
 [ -z "$CCOOL" ] || set_env BARMAN_COMMENT_COOLDOWN_MIN "$CCOOL"
 if [ -n "$SOUL_FILE" ]; then
-  ssh -i "$KEY" "root@$IP" "cat > $DATA/SOUL.md" < "$SOUL_FILE"
+  ssh -i "$KEY" "root@$IP" "n=\$(mktemp $DATA/.soul.XXXXXX) && cat > \$n && chmod 644 \$n && chown 10000:10000 \$n && mv -f \$n $DATA/SOUL.md" < "$SOUL_FILE"
   rm -f "$SOUL_FILE"
   echo "Личность: $SOUL"
 fi
