@@ -129,5 +129,9 @@ case "$DCH" in  # off — выжимка выключена: канал в .env 
 esac
 [ -z "$DUSER" ] || set_env BARMAN_DIGEST_USER "$DUSER"
 [ -z "$DMODEL" ] || set_env BARMAN_DIGEST_MODEL "$DMODEL"
+# Hermes держит системный промт (личность) и настройки в открытой сессии канала: закрываем открытые
+# Discord-сессии (мягко, архивом — история не удаляется), чтобы новая SOUL/модель вступили в силу сразу.
+ssh -i "$KEY" "root@$IP" "docker exec -u 10000 $CT hermes sessions archive --source discord --include-open --yes >/dev/null" \
+  || echo "::warning::Не удалось закрыть открытые сессии Hermes — новая личность вступит в силу с новой сессией"
 ssh -i "$KEY" "root@$IP" "chown -R 10000:10000 $DATA && docker restart $CT >/dev/null"
 echo "Бармен ($TARGET) обновлён и перезапущен"

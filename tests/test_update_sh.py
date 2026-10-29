@@ -163,3 +163,15 @@ def test_test_bootstrap_refuses_symlinked_prod_files(fake):
     r = _run(env, BARMAN_TARGET="test", BARMAN_DATA=str(data), BARMAN_BOT_TOKEN="t1")
     assert r.returncode != 0 and "ссылка" in (r.stdout + r.stderr).lower()
     assert not (data / "config.yaml").exists()
+
+
+def test_deploy_closes_open_discord_sessions_before_restart(fake):
+    """Hermes держит личность в открытой сессии: без закрытия новая SOUL/модель не вступают в силу."""
+    tmp, env, prod = _prod(fake)
+    r = _run(env, BARMAN_DATA=str(prod), BARMAN_SOUL="drakonia")
+    assert r.returncode == 0, r.stdout + r.stderr
+    log = (tmp / "log").read_text().splitlines()
+    archive = next(i for i, l in enumerate(log) if "hermes sessions archive" in l)
+    restart = next(i for i, l in enumerate(log) if l.startswith("docker restart"))
+    assert archive < restart
+    assert "--source discord" in log[archive] and "--include-open" in log[archive] and "--yes" in log[archive]
