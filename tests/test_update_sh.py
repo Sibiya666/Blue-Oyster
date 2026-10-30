@@ -13,7 +13,8 @@ echo "docker $*" >> "$LOG"
 case "$1" in
   inspect) [ "$2" = barmen ] && { echo sha256:IMG; exit 0; }; [ -f "$STATE/$2" ] && exit 0; exit 1 ;;
   run) n=$(echo "$*" | sed -E 's/.*--name ([^ ]+).*/\\1/'); touch "$STATE/$n"; exit 0 ;;
-  exec) shift 6
+  exec) case "$*" in *"python3 -"*) [ -n "$STALE_IDS" ] && echo "$STALE_IDS"; exit 0 ;; esac
+    shift 6
     if [ "$1" = set ]; then shift; [ "$1" = --force ] && shift; echo "$1=$2" >> "$CFG"; fi
     if [ "$1" = get ]; then grep "^$2=" "$CFG" | tail -1 | cut -d= -f2-; fi ;;
 esac
@@ -163,3 +164,24 @@ def test_test_bootstrap_refuses_symlinked_prod_files(fake):
     r = _run(env, BARMAN_TARGET="test", BARMAN_DATA=str(data), BARMAN_BOT_TOKEN="t1")
     assert r.returncode != 0 and "ссылка" in (r.stdout + r.stderr).lower()
     assert not (data / "config.yaml").exists()
+
+
+def test_deploy_drops_stale_discord_sessions_before_restart(fake):
+    """Hermes держит личность в открытой сессии (архив её не закрывает): устаревшие сессии удаляем до рестарта."""
+    tmp, env, prod = _prod(fake)
+    r = _run(env, BARMAN_DATA=str(prod), BARMAN_SOUL="drakonia", STALE_IDS="20261026_192416_d45d5ba0")
+    assert r.returncode == 0, r.stdout + r.stderr
+    log = (tmp / "log").read_text().splitlines()
+    check = next(i for i, l in enumerate(log) if "python3 - /opt/data/state.db /opt/data/SOUL.md" in l)
+    delete = next(i for i, l in enumerate(log) if "hermes sessions delete 20261026_192416_d45d5ba0 --yes" in l)
+    restart = next(i for i, l in enumerate(log) if l.startswith("docker restart"))
+    assert check < delete < restart
+    assert not any("sessions archive" in l for l in log)
+
+
+def test_deploy_ignores_garbage_session_ids(fake):
+    """id приходят из базы на сервере — в shell попадают только [A-Za-z0-9_-]."""
+    tmp, env, prod = _prod(fake)
+    r = _run(env, BARMAN_DATA=str(prod), BARMAN_SOUL="drakonia", STALE_IDS="x;touch_pwned $(id)")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not any("sessions delete" in l for l in (tmp / "log").read_text().splitlines())

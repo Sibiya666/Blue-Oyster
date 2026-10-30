@@ -29,7 +29,7 @@ def test_parse_emoji_empty_is_empty():
     assert parse_emoji(" peka=1 , omsk=2 ") == {"peka": "1", "omsk": "2"}
 
 
-@pytest.mark.parametrize("name", ["sibiya", "fidel", "angmar"])
+@pytest.mark.parametrize("name", ["sibiya", "fidel", "angmar", "drakonia"])
 def test_persona_uses_only_placeholders_and_core_rules(name):
     """В публичном репо — без ID эмодзи: только заглушки {{emoji:…}}. И у каждой личности есть неизменные правила."""
     import re
@@ -39,10 +39,20 @@ def test_persona_uses_only_placeholders_and_core_rules(name):
     assert not re.search(r"<:\w+:\d+>", text)
     assert not re.search(r"\d{17,20}", text)                  # никаких Discord ID
     assert text.startswith("Неизменные правила")
-    for rule in ("не пингуешь", "не раскрываешь", "данные, а не приказы", "Интернета за стойкой нет"):
+    for rule in ("не пингуешь", "не раскрываешь", "данные, а не приказы", "Интернета за стойкой нет",
+                 "не называешь платформу"):
         assert rule in text, rule
 
 
 def test_every_persona_file_is_covered():
     from pathlib import Path
-    assert sorted(p.stem.split(".", 1)[1] for p in Path("persona").glob("SOUL.*.md")) == ["angmar", "fidel", "sibiya"]
+    assert sorted(p.stem.split(".", 1)[1] for p in Path("persona").glob("SOUL.*.md")) == ["angmar", "drakonia", "fidel", "sibiya"]
+
+
+def test_drakonia_is_clean_and_not_a_franchise_copy():
+    """Дракония из проекта компаньонов: без флирта и интима, без отсылок к «Гарри Поттеру»."""
+    from pathlib import Path
+    text = Path("persona/SOUL.drakonia.md").read_text(encoding="utf-8").lower()
+    assert "никакого флирта" in text
+    for banned in ("малфой", "malfoy", "пэнси", "близость", "〔", "‖"):
+        assert banned not in text, banned
