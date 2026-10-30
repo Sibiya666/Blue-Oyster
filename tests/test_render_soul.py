@@ -56,3 +56,11 @@ def test_drakonia_is_clean_and_not_a_franchise_copy():
     assert "никакого флирта" in text
     for banned in ("малфой", "malfoy", "пэнси", "близость", "〔", "‖"):
         assert banned not in text, banned
+
+
+def test_drakonia_answers_short():
+    """Владелец: Дракония пишет слишком длинно — одна фраза, максимум две; жест — редко и в той же строке."""
+    from pathlib import Path
+    text = Path("persona/SOUL.drakonia.md").read_text(encoding="utf-8")
+    assert "максимум две" in text and "одна-три фразы" not in text
+    assert "в той же строке" in text
