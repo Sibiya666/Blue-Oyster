@@ -129,9 +129,16 @@ case "$DCH" in  # off — выжимка выключена: канал в .env 
 esac
 [ -z "$DUSER" ] || set_env BARMAN_DIGEST_USER "$DUSER"
 [ -z "$DMODEL" ] || set_env BARMAN_DIGEST_MODEL "$DMODEL"
-# Hermes держит системный промт (личность) и настройки в открытой сессии канала: закрываем открытые
-# Discord-сессии (мягко, архивом — история не удаляется), чтобы новая SOUL/модель вступили в силу сразу.
-ssh -i "$KEY" "root@$IP" "docker exec -u 10000 $CT hermes sessions archive --source discord --include-open --yes >/dev/null" \
-  || echo "::warning::Не удалось закрыть открытые сессии Hermes — новая личность вступит в силу с новой сессией"
+# Hermes записывает личность в сессию при создании и держит сессию канала открытой (архив её не закрывает):
+# удаляем открытые Discord-сессии, в чьём промте нет текущей SOUL.md, — иначе новая личность не вступит в силу.
+# Сессии с актуальной личностью не трогаем: их история остаётся.
+STALE="$(ssh -i "$KEY" "root@$IP" "docker exec -i -u 10000 $CT python3 - /opt/data/state.db /opt/data/SOUL.md" < "$REPO/deploy/stale_sessions.py")" \
+  || { STALE=""; echo "::warning::Не удалось проверить сессии Hermes — новая личность вступит в силу с новой сессией"; }
+for sid in $STALE; do
+  case "$sid" in *[!A-Za-z0-9_-]*) echo "::warning::Странный id сессии пропущен"; continue ;; esac
+  ssh -i "$KEY" "root@$IP" "docker exec -u 10000 $CT hermes sessions delete $sid --yes >/dev/null" \
+    && echo "Сессия со старой личностью удалена: $sid" \
+    || echo "::warning::Не удалось удалить сессию $sid"
+done
 ssh -i "$KEY" "root@$IP" "chown -R 10000:10000 $DATA && docker restart $CT >/dev/null"
 echo "Бармен ($TARGET) обновлён и перезапущен"
