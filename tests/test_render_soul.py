@@ -29,7 +29,7 @@ def test_parse_emoji_empty_is_empty():
     assert parse_emoji(" peka=1 , omsk=2 ") == {"peka": "1", "omsk": "2"}
 
 
-@pytest.mark.parametrize("name", ["sibiya", "fidel", "angmar", "drakonia"])
+@pytest.mark.parametrize("name", ["sibiya", "fidel", "angmar", "drakonia", "malfoy"])
 def test_persona_uses_only_placeholders_and_core_rules(name):
     """В публичном репо — без ID эмодзи: только заглушки {{emoji:…}}. И у каждой личности есть неизменные правила."""
     import re
@@ -47,7 +47,7 @@ def test_persona_uses_only_placeholders_and_core_rules(name):
 
 def test_every_persona_file_is_covered():
     from pathlib import Path
-    assert sorted(p.stem.split(".", 1)[1] for p in Path("persona").glob("SOUL.*.md")) == ["angmar", "drakonia", "fidel", "sibiya"]
+    assert sorted(p.stem.split(".", 1)[1] for p in Path("persona").glob("SOUL.*.md")) == ["angmar", "drakonia", "fidel", "malfoy", "sibiya"]
 
 
 def test_drakonia_is_clean_and_not_a_franchise_copy():
@@ -67,3 +67,10 @@ def test_drakonia_answers_short():
     assert "в той же строке" in text and "не пересказываешь" in text
     examples = [l for l in text.splitlines() if l.startswith("«") and "Объясни подробно" not in l]
     assert examples and all(len(l.split(" — ", 1)[1]) <= 60 for l in examples), "примеры короткие: модель равняется на них"
+
+
+def test_malfoy_is_a_short_fictional_male_voice():
+    from pathlib import Path
+    text=Path("persona/SOUL.malfoy.md").read_text()
+    assert "Драко Малфой" in text and "мужском роде" in text
+    assert "двух коротких предложений" in text and "вымышлен" in text
