@@ -173,16 +173,16 @@ class PilotState:
         return True
 
     def can_send(self, author_id, now):
-        sent = [v for v in self.entries.values() if v.get('status') == 'sent']
+        sent = [v for v in self.entries.values() if v.get('status') in ('sent', 'logged')]
         if sum(v.get('day') == now.date().isoformat() for v in sent) >= 10:
             return False
         return not any(v.get('author_id') == author_id and
-                       now - datetime.fromisoformat(v['sent_at']) < timedelta(hours=1) for v in sent)
+                       now - datetime.fromisoformat(v.get('decided_at') or v['sent_at']) < timedelta(hours=1) for v in sent)
 
     def finish(self, message_id, status, **metadata):
         self.entries[message_id].update(status=status, **metadata)
         self.save()
-        log.info('barman: link_pilot_audit %s', json.dumps({'message_id': message_id, **self.entries[message_id]}))
+        log.info('barman: link_pilot_audit %s', json.dumps({'message_id': message_id, **self.entries[message_id]}, ensure_ascii=False))
 
 
 CLASSIFY = '''Ты классификатор недельного эксперимента, не собеседник. Сообщение адресовано владельцу.
@@ -242,6 +242,7 @@ def install_link_pilot(bot, env, home):
     except Exception:
         log.warning('barman: link pilot state invalid; disabled')
         return
+    mode = 'post' if env.get('BARMAN_LINK_PILOT_MODE') == 'post' else 'log'
     bot._barman_link_pilot_installed = True
     lock = asyncio.Lock()
     pending = 0
@@ -303,13 +304,18 @@ def install_link_pilot(bot, env, home):
                 url = result.get('url')
                 reply = format_reference(result)
                 if reply and await still_needed():
-                    import discord
-                    sent = await message.reply(reply, mention_author=False,
-                                               allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
                     parts = urlsplit(url)
-                    state.finish(mid, 'sent', sent_at=datetime.now(timezone.utc).isoformat(),
-                                 source=f'{parts.scheme}://{parts.netloc}{parts.path}', reply_message_id=str(sent.id),
-                                 images=len(images), research=result['audit'])
+                    metadata = {'source':f'{parts.scheme}://{parts.netloc}{parts.path}',
+                                'images':len(images), 'research':result['audit']}
+                    if mode == 'log':
+                        state.finish(mid, 'logged', decided_at=datetime.now(timezone.utc).isoformat(),
+                                     candidate_reply=reply, **metadata)
+                    else:
+                        import discord
+                        sent = await message.reply(reply, mention_author=False,
+                                                   allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+                        state.finish(mid, 'sent', sent_at=datetime.now(timezone.utc).isoformat(),
+                                     reply_message_id=str(sent.id), **metadata)
                 else:
                     state.finish(mid, 'unverified_or_stale', outcome=result['status'], research=result['audit'])
             except Exception as error:
@@ -349,4 +355,4 @@ def install_link_pilot(bot, env, home):
             pending -= 1
 
     bot.add_listener(on_message, 'on_message')
-    log.info('barman: link pilot active until=%s', settings.until.isoformat())
+    log.info('barman: link pilot active mode=%s until=%s', mode, settings.until.isoformat())
