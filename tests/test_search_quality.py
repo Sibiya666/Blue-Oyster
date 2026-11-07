@@ -266,6 +266,22 @@ def test_exact_fenced_json_is_accepted_but_surrounding_text_is_not():
     assert render_search_reply(data)["status"] == "unverified_response"
 
 
+def test_link_pilot_only_sends_the_verified_url(reply_path):
+    state, run = reply_path
+    assert run("Когда релиз?", link_only=True) == URL
+    assert state.replies == [f"<{URL}>"]
+
+
+def test_link_pilot_silently_skips_missing_evidence_and_stale_requests(reply_path):
+    state, run = reply_path
+    async def no_longer_needed(): return False
+    assert run("Когда релиз?", link_only=True, before_send=no_longer_needed) is None
+    assert state.replies == []
+    state.data = result(kind="not_found", answer="Нет данных.", url="", quote="")
+    assert run("Когда релиз?", link_only=True) is None
+    assert state.replies == []
+
+
 def test_reply_audit_has_real_counts_and_does_not_log_conversation_or_keys(reply_path, caplog):
     state, run = reply_path
     caplog.set_level(logging.INFO, logger="barman.chat")

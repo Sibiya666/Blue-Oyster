@@ -259,7 +259,8 @@ def redact(text: str, env: dict) -> str:
                   "[секрет скрыт]", text, flags=re.S)
 
 
-async def answer_owner(message, text: str, env: dict, home: Path, *, history=None) -> str:
+async def answer_owner(message, text: str, env: dict, home: Path, *, history=None,
+                       link_only=False, before_send=None) -> str | None:
     import aiohttp
     history = [{"role": m["role"], "content": redact(m["content"], env)} for m in (history or [])
                if isinstance(m, dict) and m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)]
@@ -325,8 +326,11 @@ async def answer_owner(message, text: str, env: dict, home: Path, *, history=Non
         result.update(prose="Не смогла подтвердить ответ надёжным источником.",
                       source=None, status="unverified_response", reason="secret_in_source")
     reply = result["prose"] + (f"\n<{result['source']}>" if result["source"] else "")
+    if link_only:
+        reply = f"<{result['source']}>" if result["status"] == "grounded_search" and result["source"] else ""
     import discord
     audit = {"message_id": str(getattr(message, "id", "")), "generation_id": result["generation_id"],
+             "mode": "link_pilot" if link_only else "chat",
              "assessment_generation_id": result["assessment_generation_id"],
              "attempts": attempts,
              "history_messages": len(history), "web_search_requests": result["web_search_requests"],
@@ -336,6 +340,12 @@ async def answer_owner(message, text: str, env: dict, home: Path, *, history=Non
     if result["source"]:
         url = urlsplit(result["source"])
         audit["source"] = f"{url.scheme}://{url.netloc}{url.path}"
+    if link_only:
+        audit.update(prose_chars=0, sentences=0)
+        if not reply or (before_send and not await before_send()):
+            audit.update(delivered=False, skipped=True)
+            log.info("barman: reply_audit %s", redact(json.dumps(audit, ensure_ascii=True), env))
+            return None
     try:
         sent = await message.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
                                    suppress_embeds=True)
@@ -345,7 +355,7 @@ async def answer_owner(message, text: str, env: dict, home: Path, *, history=Non
         raise
     finally:
         log.info("barman: reply_audit %s", redact(json.dumps(audit, ensure_ascii=True), env))
-    return result["prose"]
+    return result["source"] if link_only else result["prose"]
 
 
 def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> None:
