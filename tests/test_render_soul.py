@@ -62,5 +62,7 @@ def test_drakonia_answers_short():
     """Владелец: Дракония пишет слишком длинно — одна фраза, максимум две; жест — редко и в той же строке."""
     from pathlib import Path
     text = Path("persona/SOUL.drakonia.md").read_text(encoding="utf-8")
-    assert "максимум две" in text and "одна-три фразы" not in text
-    assert "в той же строке" in text
+    assert "до десяти слов" in text and "одна-три фразы" not in text
+    assert "в той же строке" in text and "не пересказываешь" in text
+    examples = [l for l in text.splitlines() if l.startswith("«") and "Объясни подробно" not in l]
+    assert examples and all(len(l.split(" — ", 1)[1]) <= 60 for l in examples), "примеры короткие: модель равняется на них"
