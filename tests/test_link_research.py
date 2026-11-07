@@ -391,3 +391,39 @@ def test_retry_feedback_is_scrubbed_before_truncation():
 def test_malformed_check_feedback_does_not_supply_a_query(value):
     from barman.link_research import check_feedback
     assert check_feedback(value, lambda s: s) == {}
+
+
+@pytest.mark.parametrize('verdict,label', [('yes','Да.'),('no','Нет.')])
+def test_confirmed_boolean_answer_preserves_verdict_and_formats_only_it_with_link(verdict, label):
+    from barman import link_research
+    source={'url':'https://example.com/manual','text':('Dragging abilities with the mouse is supported in this interface.' if verdict=='yes' else 'Dragging abilities with the mouse is not supported in this interface.')}
+    choice={'url':source['url'],'subject_match':True,'intent_match':True,'time_match':True,
+            'answers_question':True,'quote':source['text'],'answer':'An unbounded explanation. More text.',
+            'verdict':verdict,'verdict_supported':True}
+    accepted=accept_evidence({'answer_type':'boolean'},[source],choice,date(2026,11,7))
+    assert accepted.get('verdict') == verdict
+    assert link_research.format_reference({**accepted,'status':'grounded'}) == label+' <'+source['url']+'>'
+
+
+@pytest.mark.parametrize('answer_type,supported,verdict', [
+    ('open',True,'yes'),('boolean',False,'no'),('boolean','true','yes'),
+    ('boolean',True,'possibly'),('boolean',True,True),
+])
+def test_unconfirmed_or_inapplicable_polarity_does_not_add_yes_no(answer_type,supported,verdict):
+    from barman import link_research
+    source={'url':'https://example.com/manual','text':'The interface supports the documented configuration procedure.'}
+    choice={'url':source['url'],'subject_match':True,'intent_match':True,'time_match':True,
+            'answers_question':True,'quote':source['text'],'answer':'Нет, perhaps.',
+            'verdict':verdict,'verdict_supported':supported}
+    accepted=accept_evidence({'answer_type':answer_type},[source],choice,date(2026,11,7))
+    assert accepted.get('verdict') is None
+    assert link_research.format_reference({**accepted,'status':'grounded'}) == '<'+source['url']+'>'
+
+
+@pytest.mark.parametrize('result', [
+    {'status':'unverified','url':'https://example.com/manual','verdict':'yes'},
+    {'status':'grounded','url':'https://127.0.0.1/manual','verdict':'no'},
+])
+def test_yes_no_formatter_never_publishes_unverified_or_unsafe_reference(result):
+    from barman.link_research import format_reference
+    assert format_reference(result) is None

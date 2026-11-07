@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from .chat import decode_payload, redact
 from .conversation import collect_episode
-from .link_research import find_reference
+from .link_research import find_reference, format_reference
 from .screenshots import prepare_screenshot
 
 log = logging.getLogger(__name__)
@@ -301,9 +301,10 @@ def install_link_pilot(bot, env, home):
                                               channel_hint=episode.topic_hint, scrub=scrub,
                                               before_request=still_needed)
                 url = result.get('url')
-                if url and await still_needed():
+                reply = format_reference(result)
+                if reply and await still_needed():
                     import discord
-                    sent = await message.reply(f'<{url}>', mention_author=False,
+                    sent = await message.reply(reply, mention_author=False,
                                                allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
                     parts = urlsplit(url)
                     state.finish(mid, 'sent', sent_at=datetime.now(timezone.utc).isoformat(),
