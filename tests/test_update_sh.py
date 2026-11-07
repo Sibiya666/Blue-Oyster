@@ -103,6 +103,7 @@ def test_all_channels_and_owner_are_set_only_after_runtime_probe(fake):
     assert dotenv["DISCORD_FREE_RESPONSE_CHANNELS"] == "0"
     assert dotenv["HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS"] == "0"
     assert "platform_toolsets.discord=[]" in (tmp / "cfg").read_text()
+    assert "streaming.enabled=false" in (tmp / "cfg").read_text()
     assert "chat-policy-probe" in (tmp / "log").read_text()
 
 

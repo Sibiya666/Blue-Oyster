@@ -187,4 +187,4 @@ def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> N
         return None
 
     ctx.register_hook("pre_gateway_dispatch", dispatch)
-    ctx.register_hook("transform_llm_output", shorten, hold_stream=True)
+    ctx.register_hook("transform_llm_output", shorten)
