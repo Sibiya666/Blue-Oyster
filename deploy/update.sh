@@ -4,7 +4,8 @@
 #   DISCORD_COMMAND_SYNC_POLICY=off — Hermes не регистрирует свои /-команды (список держит бармен);
 #   DISCORD_ALLOWED_USERS = BARMAN_AI_USERS (ID через запятую) или 0 — с кем ИИ бармена разговаривает (0 — ни с кем);
 #   DISCORD_ALLOWED_ROLES= — по ролям никого не пускаем;
-#   DISCORD_ALLOWED_CHANNELS = BARMAN_AI_CHANNELS — где ИИ разговаривает (только если передан).
+#   DISCORD_ALLOWED_CHANNELS=* — все каналы; хук ограничивает сервером канала ролей.
+#   BARMAN_SEARCH_OWNER — user ID владельца, иначе 0 (поиск закрыт).
 # В config.yaml Hermes (через hermes config set) — замки, ДО открытия доступа и с проверкой:
 #   platforms.discord.extra.allow_admin_from / group_allow_admin_from = 0 — админов нет, поэтому служебные
 #   /-команды Hermes (/model, /update, /restart…) не работают ни у кого, кроме безобидных /help и /whoami;
@@ -42,6 +43,8 @@ DCH="${BARMAN_DIGEST_CHANNEL:-}"
 DUSER="${BARMAN_DIGEST_USER:-}"
 DMODEL="${BARMAN_DIGEST_MODEL:-}"
 AIUSERS="${BARMAN_AI_USERS:-}"
+SEARCHOWNER="${BARMAN_SEARCH_OWNER:-0}"
+SEARCHUSERS="${BARMAN_SEARCH_USERS:-}"
 AICH="${BARMAN_AI_CHANNELS:-}"
 SOUL="${BARMAN_SOUL:-}"
 EMOJI="${BARMAN_EMOJI:-}"
@@ -55,6 +58,8 @@ case "$DCH" in off) ;; *[!0-9]*) echo "BARMAN_DIGEST_CHANNEL — ID канала
 case "$DUSER" in *[!A-Za-z0-9_.]*) echo "BARMAN_DIGEST_USER — имя пользователя Discord (буквы, цифры, _ .)"; exit 1 ;; esac
 case "$DMODEL$AIMODEL" in *[!A-Za-z0-9_.:/-]*) echo "BARMAN_DIGEST_MODEL / BARMAN_AI_MODEL — id модели OpenRouter"; exit 1 ;; esac
 case "$AIUSERS$AICH$CUSERS" in *[!0-9,]*) echo "BARMAN_AI_USERS / BARMAN_AI_CHANNELS / BARMAN_COMMENT_USERS — ID через запятую"; exit 1 ;; esac
+case "$SEARCHOWNER" in *[!0-9]*) echo "BARMAN_SEARCH_OWNER — один Discord user ID"; exit 1 ;; esac
+case "$SEARCHUSERS" in *[!0-9,]*|,*|*,|*,,*) echo "BARMAN_SEARCH_USERS — Discord user ID через запятую"; exit 1 ;; esac
 case "$CCHANCE$CCOOL" in *[!0-9.]*) echo "BARMAN_COMMENT_CHANCE / BARMAN_COMMENT_COOLDOWN_MIN — числа"; exit 1 ;; esac
 case "$TOKEN" in *[!A-Za-z0-9._-]*) echo "BARMAN_BOT_TOKEN — токен бота Discord"; exit 1 ;; esac
 case "$SOUL" in *[!a-z0-9_-]*) echo "BARMAN_SOUL — имя личности из persona/ (например sibiya)"; exit 1 ;; esac
@@ -92,11 +97,26 @@ ssh -i "$KEY" "root@$IP" "docker start $CT >/dev/null"  # hermes config рабо
 hermes_set platforms.discord.extra.allow_admin_from 0
 hermes_set platforms.discord.extra.group_allow_admin_from 0
 hermes_set platforms.discord.extra.dm_policy disabled
+hermes_set platforms.discord.extra.require_mention true
+hermes_set platforms.discord.extra.thread_require_mention true
+hermes_set platforms.discord.extra.free_response_channels 0
+hermes_set platforms.discord.extra.auto_thread false
+hermes_set platform_toolsets.discord '[]'
+hermes_set streaming.enabled false
+hermes_set display.platforms.discord.streaming false
+SCOPECH="${CH:-${AICH%%,*}}"
+[ -z "$SCOPECH" ] || set_env BARMAN_SCOPE_CHANNEL "$SCOPECH"
+ssh -i "$KEY" "root@$IP" "docker exec -i -u 10000 $CT python3 - /opt/data chat-policy-probe" < "$REPO/deploy/check_chat_runtime.py" \
+  || { echo "Политика чата недоступна — каналы не расширяю"; exit 1; }
 hermes_set display.busy_input_mode queue  # дописал, пока бармен думает — отдельный ответ, без «перенаправил запуск»
 [ -z "$AIMODEL" ] || { hermes_set model.default "$AIMODEL"; echo "Модель разговора: $AIMODEL"; }
 set_env DISCORD_COMMAND_SYNC_POLICY off
 set_env DISCORD_AUTO_THREAD false
 set_env DISCORD_THREAD_REQUIRE_MENTION true
+set_env DISCORD_REQUIRE_MENTION true
+set_env DISCORD_FREE_RESPONSE_CHANNELS 0
+set_env HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS 0
+set_env HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS 0
 set_env DISCORD_REPLY_TO_MODE first
 set_env DISCORD_ALLOW_MENTION_EVERYONE false
 set_env DISCORD_ALLOW_MENTION_ROLES false
@@ -106,7 +126,9 @@ set_env DISCORD_HOME_CHANNEL 0
 set_env HERMES_GATEWAY_BUSY_ACK_ENABLED false  # без служебных «⚡ прерываю…» в чате
 set_env DISCORD_ALLOWED_ROLES ""
 set_env DISCORD_ALLOWED_USERS "${AIUSERS:-0}"
-[ -z "$AICH" ] || set_env DISCORD_ALLOWED_CHANNELS "$AICH"
+set_env BARMAN_SEARCH_OWNER "$SEARCHOWNER"
+set_env BARMAN_SEARCH_USERS "$SEARCHUSERS"
+set_env DISCORD_ALLOWED_CHANNELS '*'
 set_env BARMAN_COMMENT_USERS "${CUSERS:-0}"
 [ -z "$AICH" ] || set_env BARMAN_COMMENT_CHANNELS "$AICH"
 [ -z "$AIMODEL" ] || set_env BARMAN_COMMENT_MODEL "$AIMODEL"
