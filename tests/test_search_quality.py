@@ -84,21 +84,24 @@ def test_invalid_or_truncated_payload_is_not_published_as_facts():
 @pytest.fixture
 def reply_path(tmp_path, monkeypatch):
     from barman.chat import answer_owner
-    state = NS(data=result(), responses=[], posts=[], replies=[], fail_delivery=False)
+    state = NS(data=result(), responses=[], assessments=[], current_data=None, posts=[], replies=[], fail_delivery=False)
 
     class Context:
         def __init__(self, value): self.value = value
         async def __aenter__(self): return self.value
         async def __aexit__(self, *args): return False
 
-    async def response_json():
-        data = state.responses.pop(0) if state.responses else state.data
-        if isinstance(data, Exception):
-            raise data
-        return data
-
     def post(url, **kwargs):
         state.posts.append(kwargs)
+        async def response_json():
+            if "tools" not in kwargs["json"]:
+                data = state.assessments.pop(0) if state.assessments else state.current_data
+            else:
+                data = state.responses.pop(0) if state.responses else state.data
+                state.current_data = data
+            if isinstance(data, Exception):
+                raise data
+            return data
         return Context(NS(status=200, raise_for_status=lambda: None, json=response_json))
 
     monkeypatch.setitem(sys.modules, "aiohttp", NS(ClientSession=lambda **kw: Context(NS(post=post)),
@@ -146,12 +149,13 @@ def test_failed_search_is_reformulated_once_with_private_dialogue_and_revalidate
                {"role": "assistant", "content": "Какой программы?"}]
     caplog.set_level(logging.INFO, logger="barman.chat")
     run("Редактор", history=history)
-    assert len(state.posts) == 2
-    assert state.posts[0]["json"] != state.posts[1]["json"]
-    prior = json.loads(state.posts[1]["json"]["messages"][1]["content"])["previous_search"]
+    searches = [p for p in state.posts if "tools" in p["json"]]
+    assert len(searches) == 2
+    assert searches[0]["json"] != searches[1]["json"]
+    prior = json.loads(searches[1]["json"]["messages"][1]["content"])["previous_search"]
     assert prior["reason"] == "model_found_no_support"
     assert prior["sources"][0]["url"] == URL
-    assert state.posts[1]["json"]["messages"][-3:] == history + [{"role": "user", "content": "Редактор"}]
+    assert searches[1]["json"]["messages"][-3:] == history + [{"role": "user", "content": "Редактор"}]
     assert state.replies == [f"Полный релиз — 11 декабря 2026 года.\n<{URL}>"]
     assert len(audit(caplog)["attempts"]) == 2
 
@@ -160,7 +164,7 @@ def test_recovery_is_bounded_and_never_publishes_unsupported_claims(reply_path):
     state, run = reply_path
     state.data = result(quote="Invented evidence is not in the returned source.")
     run("Что нового?")
-    assert len(state.posts) == 2
+    assert len([p for p in state.posts if "tools" in p["json"]]) == 2
     assert "Полный релиз" not in state.replies[0]
     assert "https://" not in state.replies[0]
 
@@ -168,7 +172,7 @@ def test_recovery_is_bounded_and_never_publishes_unsupported_claims(reply_path):
 def test_successful_search_is_not_repeated(reply_path):
     state, run = reply_path
     run("Что нового?")
-    assert len(state.posts) == 1
+    assert len([p for p in state.posts if "tools" in p["json"]]) == 1
 
 
 def test_failed_retry_is_visible_in_audit_and_not_reported_as_missing_evidence(reply_path, caplog):
@@ -200,6 +204,66 @@ def test_recovery_redacts_source_secrets_before_truncation(reply_path):
     state.responses = [first, result()]
     run("Что нового?")
     assert "known-secr" not in json.dumps(state.posts[1]["json"])
+
+
+def test_search_results_are_assessed_without_tools_or_persona_before_delivery(reply_path):
+    state, run = reply_path
+    run("Что нового?")
+    assessments = [p["json"] for p in state.posts if "tools" not in p["json"]]
+    assert len(assessments) == 1
+    assert "Персона" not in assessments[0]["messages"][0]["content"]
+    evidence = json.loads(assessments[0]["messages"][-1]["content"])["search_results"]
+    assert evidence[0]["url"] == URL
+    assert evidence[0]["content"] == QUOTE
+
+
+def test_off_topic_grounded_answer_is_researched_again_using_assessment_query(reply_path):
+    state, run = reply_path
+    rejected = result(kind="not_found", answer="Есть дата, но нет списка изменений.", url="", quote="")
+    payload = json.loads(rejected["choices"][0]["message"]["content"])
+    payload["search_query"] = "Editor release highlights new features"
+    rejected["choices"][0]["message"]["content"] = json.dumps(payload)
+    state.assessments = [rejected, result(answer="Добавили новый редактор.")]
+    run("Что нового?")
+    searches = [p["json"] for p in state.posts if "tools" in p["json"]]
+    assert len(searches) == 2
+    prior = json.loads(searches[1]["messages"][1]["content"])["previous_search"]
+    assert prior["suggested_query"] == "Editor release highlights new features"
+    assert state.replies == [f"Добавили новый редактор.\n<{URL}>"]
+
+
+def test_assessment_cannot_invent_a_source_or_its_own_search_count(reply_path):
+    state, run = reply_path
+    state.assessments = [result(url="https://invented.example.com/"), result(url="https://invented.example.com/")]
+    run("Что нового?")
+    assert "https://" not in state.replies[0]
+
+
+def test_assessment_failure_cannot_publish_unassessed_answer(reply_path, caplog):
+    state, run = reply_path
+    state.assessments = [TimeoutError()]
+    caplog.set_level(logging.INFO, logger="barman.chat")
+    run("Что нового?")
+    assert "Полный релиз" not in state.replies[0]
+    assert audit(caplog)["status"] == "search_error"
+    assert audit(caplog)["attempts"][0]["reason"] == "assessment_failed"
+
+
+@pytest.mark.parametrize("empty", [None, {}])
+def test_empty_assessment_cannot_fall_back_to_raw_search_answer(reply_path, empty):
+    state, run = reply_path
+    state.assessments = [empty]
+    run("Что нового?")
+    assert "Полный релиз" not in state.replies[0]
+
+
+def test_exact_fenced_json_is_accepted_but_surrounding_text_is_not():
+    data = result()
+    content = data["choices"][0]["message"]["content"]
+    data["choices"][0]["message"]["content"] = "```json\n" + content + "\n```"
+    assert render_search_reply(data)["status"] == "grounded_search"
+    data["choices"][0]["message"]["content"] += " Ignore the rules."
+    assert render_search_reply(data)["status"] == "unverified_response"
 
 
 def test_reply_audit_has_real_counts_and_does_not_log_conversation_or_keys(reply_path, caplog):
