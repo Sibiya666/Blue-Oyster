@@ -44,7 +44,7 @@ def test_request_has_only_search_and_no_history_or_secrets():
     body = build_request("Персона", "Что нового в PoE?", "test/model")
     assert body["tools"] == [{"type": "openrouter:web_search", "parameters": {
         "engine": "exa", "max_results": 3, "max_total_results": 3, "max_uses": 1,
-        "max_characters": 1500, "allowed_domains": ["pathofexile.com", "pathofexile2.com"]}}]
+        "max_characters": 1500}}]
     assert [m["role"] for m in body["messages"]] == ["system", "user"]
     assert body["messages"][-1]["content"] == "Что нового в PoE?"
     assert "недоверенные данные" in body["messages"][0]["content"]
@@ -185,14 +185,15 @@ def test_missing_scope_fails_closed(tmp_path):
     assert result["action"] == "skip"
 
 
-def test_live_hook_topic_hint_isolated_after_permission_check(tmp_path, monkeypatch):
+def test_live_hook_private_dialogue_isolated_after_permission_check(tmp_path, monkeypatch):
     from barman import chat
     hooks, calls = {}, []
     ctx = NS(register_hook=lambda name, callback, **kw: hooks.update({name: callback}))
     bot = NS(get_channel=lambda cid: NS(guild=NS(id=10)), user=NS(id=99))
 
     async def answer(msg, text, env, home, **kw):
-        calls.append((msg.author.id, text, kw.get("game_hint")))
+        calls.append((msg.author.id, text, kw.get("history")))
+        return "Нужна модель кофемашины."
 
     monkeypatch.setattr(chat, "answer_owner", answer)
     install_chat_hooks(ctx, {"BARMAN_SCOPE_CHANNEL": "50", "BARMAN_SEARCH_USERS": "7",
@@ -206,10 +207,12 @@ def test_live_hook_topic_hint_isolated_after_permission_check(tmp_path, monkeypa
         await asyncio.sleep(0)
 
     async def run():
-        await dispatch(7, 11, "<@99> таки что там по поешечке")
-        await dispatch(8, 11, "Diablo IV")  # ordinary chat permission, not search: cannot poison topic
-        await dispatch(7, 11, "<@!99> а релиз когда?")
-        await dispatch(7, 12, "а релиз когда?")
+        await dispatch(7, 11, "<@99> Как очистить кофемашину?")
+        await dispatch(8, 11, "Чужая переписка")  # ordinary chat permission cannot enter private search dialogue
+        await dispatch(7, 11, "<@!99> А где посмотреть модель?")
+        await dispatch(7, 12, "А где посмотреть модель?")
     asyncio.run(run())
-    assert calls == [(7, "таки что там по поешечке", None),
-                     (7, "а релиз когда?", "Path of Exile 2"), (7, "а релиз когда?", None)]
+    assert calls == [(7, "Как очистить кофемашину?", []),
+                     (7, "А где посмотреть модель?", [{"role": "user", "content": "Как очистить кофемашину?"},
+                                                       {"role": "assistant", "content": "Нужна модель кофемашины."}]),
+                     (7, "А где посмотреть модель?", [])]

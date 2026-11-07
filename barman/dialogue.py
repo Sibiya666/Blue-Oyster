@@ -1,50 +1,29 @@
-"""Short-lived per-user topics, not transcript/history or tool permissions."""
+"""Bounded private dialogue per SDK guild/channel/author. No channel backfill or source pages."""
 from collections import OrderedDict
-from dataclasses import dataclass
-import re
 import time
 
-from .search_policy import search_policy
 
-FOLLOWUP_WORDS = frozenset("а и но ну так таки что там это этой этот он она оно его ее когда же то все ок ладно наконец скажи пожалуйста во сколько выйдет выходит выходить релиз релиза полный полная новая новую новый следующая следующую лигу лига лиги обновление обновления патч патча дата даты старт старта будет уже еще тогда ранний доступ первой вторую первую второй 1 2 1.0 один два".split())
+class DialogueMemory:
+    def __init__(self, *, ttl=900, capacity=128, turns=4):
+        self.ttl, self.capacity, self.turns = ttl, capacity, turns
+        self._dialogs = OrderedDict()
 
-
-@dataclass(frozen=True)
-class TopicInput:
-    text: str
-    game_hint: str | None = None
-
-
-class TopicMemory:
-    def __init__(self, *, ttl=900, capacity=128):
-        self.ttl, self.capacity = ttl, capacity
-        self._topics = OrderedDict()
-
-    def resolve(self, key, text: str, *, now=None) -> TopicInput:
+    def history(self, key, *, now=None):
         now = time.monotonic() if now is None else now
-        previous = self._topics.pop(key, None)
-        if previous and now - previous[2] >= self.ttl:
-            previous = None
-        explicit = search_policy(text)
-        hint = None
-        effective = text
-        if explicit.game is None:
-            words = re.findall(r"[\w.]+", text.lower().replace("ё", "е").strip(" .!?"))
-            if previous and words and all(w in FOLLOWUP_WORDS for w in words):
-                hint = previous[0]
-                if previous[1]:
-                    selection = " ".join(words)
-                    if re.fullmatch(r"полный(?:\s+релиз)?|релиз", selection):
-                        effective = "Когда полный релиз?"
-                    elif re.fullmatch(r"(?:(?:новая|новую|следующая|следующую)\s+)?лиг[ау]", selection):
-                        effective = "Когда новая лига?"
-                    elif selection in ("обновление", "патч", "новый патч"):
-                        effective = "Когда обновление?"
-            else:
-                return TopicInput(text)  # unknown/new topic clears the previous hint
-        policy = search_policy(effective, game_hint=hint)
-        if policy.game:
-            self._topics[key] = (policy.game, bool(policy.clarification), now)
-            while len(self._topics) > self.capacity:
-                self._topics.popitem(last=False)
-        return TopicInput(effective, hint)
+        entry = self._dialogs.get(key)
+        if entry is None:
+            return []
+        if now - entry[1] >= self.ttl:
+            del self._dialogs[key]
+            return []
+        return [dict(message) for message in entry[0]]
+
+    def remember(self, key, question: str, answer: str, *, now=None):
+        now = time.monotonic() if now is None else now
+        messages = self.history(key, now=now)
+        messages.extend(({"role": "user", "content": question[:2000]},
+                         {"role": "assistant", "content": answer[:500]}))
+        self._dialogs.pop(key, None)
+        self._dialogs[key] = (messages[-self.turns * 2:], now)
+        while len(self._dialogs) > self.capacity:
+            self._dialogs.popitem(last=False)

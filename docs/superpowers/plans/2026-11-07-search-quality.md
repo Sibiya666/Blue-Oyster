@@ -1,14 +1,15 @@
-# Search evidence and source quality
+# Universal search quality and private dialogue
 
-Goal: fix the observed ambiguous PoE release answer with an unrelated DTF citation, and make real search usage auditable.
+Goal: answer information requests across topics with usable private context and auditable evidence, retaining Discord-ID permissions and short replies.
 
-Keep the current isolated OpenRouter path and existing Discord-ID permission checks. Do not add Hermes tools or local URL fetching. Ambiguous colloquial PoE release questions get one clarification before any model call. Fresh PoE/Diablo queries restrict search and displayed citations to developer domains. Fresh factual answers require both a positive provider search counter and a suitable citation; otherwise return an explicit inability to verify. This verifies retrieval, not universal factual correctness.
+One existing OpenRouter web_search route handles every topic. The model resolves the current question using up to four private Q/A pairs and decides between chat, clarification, fact and not_found. It returns internal JSON with answer, selected source URL and a verbatim supporting quote. For facts, code requires a positive provider search counter, a safe URL present in current annotations, and a normalized exact quote in that source's title/excerpt. No fabricated link, topic-specific source allowlists, keyword freshness router, or local URL fetching. Slang such as «поешечка = PoE 2» is persona knowledge only.
 
-User steering: unqualified «поешечка/поешка/пое» means PoE 2 in this server; explicit PoE 1 overrides the default. Clarify only the requested event, not the slang or default game. Do not mix first-game patch indices with PoE 2 Early Access Patch Notes (/forum/view-forum/2212, verified on the official site).
+Dialogue is bounded by SDK guild/channel/author, TTL15min, capacity128; no channel backfill or source pages in memory. Authorization precedes context access. Store only delivered turns, redact known profile secrets before model/memory/output/logs. The model gets no Hermes tools, files or terminal. Logs record provider counts, evidence length, delivery shape and rejection reason, not conversation text or credentials.
 
-Live screenshot follow-up: preserve only a short per-user/channel topic (game enum and pending event clarification, TTL15min/cap128), never shared messages. Apply known-game domains and evidence to vague informational questions too. Official GGG announcements are forum threads: allow numeric threads only with an anchored official page-title category from provider metadata. Do not mistake publication dates for Last bumped. Directly verified announcement3999366 confirms the full release on December11; the previous blanket thread filter was too restrictive.
+The model chooses sources and semantic support; exact-quote checks verify retrieval provenance, not universal factual truth. Native JSON response format was validated on a real Python-version query, outside gaming.
 
-- [x] Regression tests: screenshot prompt, official-domain filtering, missing/zero usage, rejected DTF/lookalike domains, two-sentence fallback; price/version and mixed factual/joke requests.
-- [x] Implement pure search policy, integrate evidence checks and current date, and log delivered-reply audit metadata without conversation contents or credentials.
-- [ ] Mocked reply-path tests and real API checks on the test container without publishing Discord messages.
-- [x] Full pytest (141 passed), review with no remaining blockers. Live staging found token-budget truncation; add headroom without increasing prose length and reject `finish_reason=length`. Follow-up topic isolation and official-section metadata have regressions. Final staging verification follows. No merge or production deployment without a further user instruction.
+- [x] Replace the game router with universal JSON/evidence validation and generic bounded private dialogue.
+- [x] Regressions for arbitrary topics, quote/source mismatch, malformed/truncated output, credentials, user/channel/guild isolation and TTL/bounds.
+- [x] Full pytest (139 passed) and independent review without remaining findings. Secret redaction precedes formatting/truncation, with a dotted-token regression.
+- [ ] Real API checks on test: unrelated topics and a conversational follow-up, no Discord test posts.
+- [ ] Update PR32 and staging deployment. No merge or production deployment without further user instruction.
