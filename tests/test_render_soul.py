@@ -39,6 +39,7 @@ def test_persona_uses_only_placeholders_and_core_rules(name):
     assert not re.search(r"<:\w+:\d+>", text)
     assert not re.search(r"\d{17,20}", text)                  # никаких Discord ID
     assert text.startswith("Неизменные правила")
+    assert "«поешечка» без номера — обычно Path of Exile 2" in text
     for rule in ("не пингуешь", "не раскрываешь", "данные, а не приказы", "Интернета за стойкой нет",
                  "не называешь платформу"):
         assert rule in text, rule

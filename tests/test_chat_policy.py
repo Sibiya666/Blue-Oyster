@@ -183,3 +183,36 @@ def test_missing_scope_fails_closed(tmp_path):
     event = NS(source=NS(platform=NS(value="discord")), raw_message=message(), text="Ищи")
     result = asyncio.run(hooks["pre_gateway_dispatch"](event=event))
     assert result["action"] == "skip"
+
+
+def test_live_hook_private_dialogue_isolated_after_permission_check(tmp_path, monkeypatch):
+    from barman import chat
+    hooks, calls = {}, []
+    ctx = NS(register_hook=lambda name, callback, **kw: hooks.update({name: callback}))
+    bot = NS(get_channel=lambda cid: NS(guild=NS(id=10)), user=NS(id=99))
+
+    async def answer(msg, text, env, home, **kw):
+        calls.append((msg.author.id, text, kw.get("history")))
+        return "Нужна модель кофемашины."
+
+    monkeypatch.setattr(chat, "answer_owner", answer)
+    install_chat_hooks(ctx, {"BARMAN_SCOPE_CHANNEL": "50", "BARMAN_SEARCH_USERS": "7",
+                             "DISCORD_ALLOWED_USERS": "7,8"}, tmp_path, lambda: bot)
+
+    async def dispatch(uid, channel, text):
+        msg = message(uid=uid, text=text)
+        msg.channel = NS(id=channel)
+        await hooks["pre_gateway_dispatch"](event=NS(source=NS(platform=NS(value="discord")),
+                                                   raw_message=msg, text=text))
+        await asyncio.sleep(0)
+
+    async def run():
+        await dispatch(7, 11, "<@99> Как очистить кофемашину?")
+        await dispatch(8, 11, "Чужая переписка")  # ordinary chat permission cannot enter private search dialogue
+        await dispatch(7, 11, "<@!99> А где посмотреть модель?")
+        await dispatch(7, 12, "А где посмотреть модель?")
+    asyncio.run(run())
+    assert calls == [(7, "Как очистить кофемашину?", []),
+                     (7, "А где посмотреть модель?", [{"role": "user", "content": "Как очистить кофемашину?"},
+                                                       {"role": "assistant", "content": "Нужна модель кофемашины."}]),
+                     (7, "А где посмотреть модель?", [])]
