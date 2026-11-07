@@ -84,14 +84,18 @@ def test_invalid_or_truncated_payload_is_not_published_as_facts():
 @pytest.fixture
 def reply_path(tmp_path, monkeypatch):
     from barman.chat import answer_owner
-    state = NS(data=result(), posts=[], replies=[], fail_delivery=False)
+    state = NS(data=result(), responses=[], posts=[], replies=[], fail_delivery=False)
 
     class Context:
         def __init__(self, value): self.value = value
         async def __aenter__(self): return self.value
         async def __aexit__(self, *args): return False
 
-    async def response_json(): return state.data
+    async def response_json():
+        data = state.responses.pop(0) if state.responses else state.data
+        if isinstance(data, Exception):
+            raise data
+        return data
 
     def post(url, **kwargs):
         state.posts.append(kwargs)
@@ -125,6 +129,77 @@ def test_search_generation_budget_is_separate_from_discord_sentence_limit(reply_
     # Search/tool use, JSON and evidence need room beyond the short public answer.
     assert 4096 <= state.posts[0]["json"]["max_tokens"] <= 8192
     assert state.replies == [f"Добавят новые главы. Будут новые противники.\n<{URL}>"]
+
+
+def test_clarification_can_have_an_explanation_after_the_question():
+    data = result(count=None, kind="clarification", answer="Какой релиз? Назови программу.", url="", quote="")
+    assert render_search_reply(data)["prose"] == "Какой релиз? Назови программу."
+    assert render_search_reply(data)["status"] == "clarification"
+
+
+def test_failed_search_is_reformulated_once_with_private_dialogue_and_revalidated(reply_path, caplog):
+    state, run = reply_path
+    first = result(kind="not_found", answer="Не нашла.", url="", quote="")
+    first["choices"][0]["message"]["annotations"] = result()["choices"][0]["message"]["annotations"]
+    state.responses = [first, result()]
+    history = [{"role": "user", "content": "Что нового в релизе?"},
+               {"role": "assistant", "content": "Какой программы?"}]
+    caplog.set_level(logging.INFO, logger="barman.chat")
+    run("Редактор", history=history)
+    assert len(state.posts) == 2
+    assert state.posts[0]["json"] != state.posts[1]["json"]
+    prior = json.loads(state.posts[1]["json"]["messages"][1]["content"])["previous_search"]
+    assert prior["reason"] == "model_found_no_support"
+    assert prior["sources"][0]["url"] == URL
+    assert state.posts[1]["json"]["messages"][-3:] == history + [{"role": "user", "content": "Редактор"}]
+    assert state.replies == [f"Полный релиз — 11 декабря 2026 года.\n<{URL}>"]
+    assert len(audit(caplog)["attempts"]) == 2
+
+
+def test_recovery_is_bounded_and_never_publishes_unsupported_claims(reply_path):
+    state, run = reply_path
+    state.data = result(quote="Invented evidence is not in the returned source.")
+    run("Что нового?")
+    assert len(state.posts) == 2
+    assert "Полный релиз" not in state.replies[0]
+    assert "https://" not in state.replies[0]
+
+
+def test_successful_search_is_not_repeated(reply_path):
+    state, run = reply_path
+    run("Что нового?")
+    assert len(state.posts) == 1
+
+
+def test_failed_retry_is_visible_in_audit_and_not_reported_as_missing_evidence(reply_path, caplog):
+    state, run = reply_path
+    state.responses = [result(kind="not_found", answer="Не нашла.", url="", quote=""), TimeoutError()]
+    caplog.set_level(logging.INFO, logger="barman.chat")
+    run("Что нового?")
+    record = audit(caplog)
+    assert len(record["attempts"]) == 2
+    assert record["status"] == record["attempts"][1]["status"] == "search_error"
+
+
+def test_retry_cannot_use_old_citations_as_current_evidence(reply_path):
+    state, run = reply_path
+    first = result(kind="not_found", answer="Не нашла.")
+    second = result()
+    second["choices"][0]["message"]["annotations"] = []
+    state.responses = [first, second]
+    run("Что нового?")
+    assert "https://" not in state.replies[0]
+    assert "Полный релиз" not in state.replies[0]
+
+
+def test_recovery_redacts_source_secrets_before_truncation(reply_path):
+    state, run = reply_path
+    first = result(kind="not_found", answer="Не нашла.")
+    first["choices"][0]["message"]["annotations"][0]["url_citation"]["content"] = (
+        "x" * 1490 + "known-secret-token-123")
+    state.responses = [first, result()]
+    run("Что нового?")
+    assert "known-secr" not in json.dumps(state.posts[1]["json"])
 
 
 def test_reply_audit_has_real_counts_and_does_not_log_conversation_or_keys(reply_path, caplog):
