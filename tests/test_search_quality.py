@@ -118,6 +118,15 @@ def audit(caplog):
     return json.loads(next(r.message.split("reply_audit ", 1)[1] for r in caplog.records if "reply_audit " in r.message))
 
 
+def test_search_generation_budget_is_separate_from_discord_sentence_limit(reply_path):
+    state, run = reply_path
+    state.data = result(answer="Добавят новые главы. Будут новые противники. Третье предложение лишнее.")
+    run("А что будет в релизе?")
+    # Search/tool use, JSON and evidence need room beyond the short public answer.
+    assert 4096 <= state.posts[0]["json"]["max_tokens"] <= 8192
+    assert state.replies == [f"Добавят новые главы. Будут новые противники.\n<{URL}>"]
+
+
 def test_reply_audit_has_real_counts_and_does_not_log_conversation_or_keys(reply_path, caplog):
     state, run = reply_path
     caplog.set_level(logging.INFO, logger="barman.chat")

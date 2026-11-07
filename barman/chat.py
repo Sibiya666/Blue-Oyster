@@ -75,7 +75,8 @@ def build_request(soul: str, text: str, model: str, *, history=None) -> dict:
             "tools": [{"type": "openrouter:web_search", "parameters": {
                 "engine": "exa", "max_results": 3, "max_total_results": 3,
                 "max_uses": 1, "max_characters": 1500}}],
-            "response_format": {"type": "json_object"}, "max_tokens": 800, "temperature": 0.2}
+            # Tool use and evidence JSON share this budget; Discord prose is capped separately.
+            "response_format": {"type": "json_object"}, "max_tokens": 4096, "temperature": 0.2}
 
 
 def clean_answer(text: str) -> str:
