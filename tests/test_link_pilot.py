@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 
+import pytest
+
 from barman.link_pilot import PilotSettings, PilotState, eligible, parse_decision, anonymize
 
 NOW = datetime(2026, 11, 7, tzinfo=timezone.utc)
@@ -118,15 +120,13 @@ def test_listener_rechecks_owner_response_after_research(tmp_path,monkeypatch):
     after=[];calls=[];listeners=[]
     async def no_sleep(seconds): pass
     async def classify(*args,**kwargs): return 'Public product release date'
-    async def research(message,query,env,home,**kwargs):
-        calls.append(query)
-        assert kwargs['link_only'] is True
+    async def research(question,context,env,**kwargs):
+        calls.append(question)
         after.append(NS(author=NS(id=7)))
-        assert not await kwargs['before_send']()
-        return None
+        return {'url':'https://example.com/manual','status':'grounded','audit':{}}
     monkeypatch.setattr(link_pilot.asyncio,'sleep',no_sleep)
     monkeypatch.setattr(link_pilot,'classify',classify)
-    monkeypatch.setattr(link_pilot,'answer_owner',research)
+    monkeypatch.setattr(link_pilot,'find_reference',research)
     bot=NS(user=NS(id=99),get_channel=lambda i:NS(guild=NS(id=10)),
            add_listener=lambda fn,event:listeners.append(fn))
     env={'BARMAN_LINK_PILOT_OWNER':'7','BARMAN_SCOPE_CHANNEL':'10',
@@ -140,7 +140,7 @@ def test_listener_rechecks_owner_response_after_research(tmp_path,monkeypatch):
     message.channel=NS(id=10,fetch_message=fetch,history=history)
     link_pilot.install_link_pilot(bot,env,tmp_path)
     asyncio.run(listeners[0](message))
-    assert calls==['Public product release date']
+    assert calls==['Когда релиз?']
     assert PilotState(tmp_path/'barman'/'link-pilot.json').entries['100']['status']=='unverified_or_stale'
 
 
@@ -158,7 +158,7 @@ def test_listener_cancels_if_referenced_context_was_edited(tmp_path,monkeypatch)
          'BARMAN_LINK_PILOT_START':(now-timedelta(minutes=1)).isoformat(),
          'BARMAN_LINK_PILOT_UNTIL':(now+timedelta(days=6)).isoformat()}
     message=msg(mentions=());message.guild.members=[];message.created_at=now
-    message.reference=NS(channel_id=10,message_id=1,resolved=NS(id=1,created_at=now-timedelta(seconds=30),channel=NS(id=10),author=NS(id=7),content='Old context'))
+    message.reference=NS(channel_id=10,message_id=1,resolved=NS(id=1,created_at=now-timedelta(seconds=30),guild=message.guild,channel=NS(id=10),author=NS(id=7,bot=False),webhook_id=None,attachments=[],reference=None,content='Old context'))
     async def fetch(mid): return message if mid==100 else NS(content='Edited context')
     async def history(**kwargs):
         for m in []: yield m
@@ -187,3 +187,142 @@ def test_long_root_cannot_push_recent_clarifications_out_of_context():
     assert len(packed)<2000
     assert 'Old announcement' in packed
     assert 'Clarified product and release' in packed
+
+
+# Synthetic SDK boundary shared by the cancellation/queue regressions below.
+def pilot_runtime(tmp_path):
+    now = datetime.now(timezone.utc)
+    guild = NS(id=10, members=[])
+    channel = NS(id=20, name='topic')
+    messages, after, listeners = {}, [], []
+
+    def make(mid, uid=8, *, guild_id=10, mentions=(7,), parent=None, text='Public question?'):
+        message = NS(id=mid, guild=guild if guild_id == 10 else NS(id=guild_id, members=[]),
+                     channel=channel, author=NS(id=uid, bot=False, name=f'Participant{uid}'),
+                     content=text, created_at=now, mentions=[NS(id=i) for i in mentions],
+                     attachments=[], webhook_id=None,
+                     reference=NS(message_id=parent.id, channel_id=channel.id, guild_id=10,
+                                  resolved=parent) if parent else None)
+        messages[mid] = message
+        return message
+
+    async def fetch(mid): return messages[mid]
+    async def history(**kwargs):
+        source = after if 'after' in kwargs else sorted(messages.values(), key=lambda m: m.id, reverse=True)
+        for item in source:
+            if 'before' not in kwargs or item.id < kwargs['before'].id:
+                yield item
+    channel.fetch_message, channel.history = fetch, history
+    bot = NS(user=NS(id=99), get_channel=lambda _: NS(guild=guild),
+             add_listener=lambda fn, _: listeners.append(fn))
+    env = {'BARMAN_LINK_PILOT_OWNER': '7', 'BARMAN_SCOPE_CHANNEL': '20',
+           'BARMAN_LINK_PILOT_START': (now-timedelta(minutes=1)).isoformat(),
+           'BARMAN_LINK_PILOT_UNTIL': (now+timedelta(days=1)).isoformat()}
+    (tmp_path / 'SOUL.md').write_text('')
+    return NS(make=make, messages=messages, after=after, listeners=listeners, bot=bot, env=env)
+
+
+def test_context_withdrawn_during_image_processing_never_reaches_research(tmp_path, monkeypatch):
+    import asyncio
+    from barman import link_pilot
+    runtime = pilot_runtime(tmp_path)
+    root = runtime.make(10, uid=7, text='Original context')
+    root.attachments = [NS(id=201)]
+    message = runtime.make(100, parent=root)
+    research_calls = []
+
+    async def no_sleep(_): pass
+    async def images(*args):
+        root.content = 'Context withdrawn during OCR'
+        return [{'image_url': 'sanitized'}]
+    async def research(*args, **kwargs):
+        research_calls.append(True)
+        return {'url': None, 'status': 'skip', 'audit': {}}
+    monkeypatch.setattr(link_pilot.asyncio, 'sleep', no_sleep)
+    monkeypatch.setattr(link_pilot, 'prepare_images', images)
+    monkeypatch.setattr(link_pilot, 'find_reference', research)
+    link_pilot.install_link_pilot(runtime.bot, runtime.env, tmp_path)
+    asyncio.run(runtime.listeners[0](message))
+    assert research_calls == []
+    assert PilotState(tmp_path/'barman/link-pilot.json').entries['100']['status'] == 'owner_answered_or_stale'
+
+
+def test_research_receives_live_cancellation_callback(tmp_path, monkeypatch):
+    import asyncio
+    from barman import link_pilot
+    runtime = pilot_runtime(tmp_path)
+    message = runtime.make(100)
+    checks = []
+    async def no_sleep(_): pass
+    async def research(*args, before_request, **kwargs):
+        checks.append(await before_request())
+        runtime.after.append(NS(author=NS(id=7)))
+        checks.append(await before_request())
+        return {'url': None, 'status': 'cancelled', 'audit': {}}
+    monkeypatch.setattr(link_pilot.asyncio, 'sleep', no_sleep)
+    monkeypatch.setattr(link_pilot, 'find_reference', research)
+    link_pilot.install_link_pilot(runtime.bot, runtime.env, tmp_path)
+    asyncio.run(runtime.listeners[0](message))
+    assert checks == [True, False]
+    assert PilotState(tmp_path/'barman/link-pilot.json').entries['100']['status'] == 'unverified_or_stale'
+
+
+@pytest.mark.parametrize('invalid_kind', ['foreign_guild', 'bot_mention', 'command', 'stale', 'short'])
+def test_ineligible_events_cannot_occupy_queue_slots(tmp_path, monkeypatch, invalid_kind):
+    import asyncio
+    from barman import link_pilot
+    runtime = pilot_runtime(tmp_path)
+    real_sleep = asyncio.sleep
+    async def research(*args, **kwargs): return {'url': None, 'status': 'skip', 'audit': {}}
+    monkeypatch.setattr(link_pilot, 'find_reference', research)
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def paused(seconds):
+            assert seconds == 20
+            entered.set()
+            await release.wait()
+        monkeypatch.setattr(link_pilot.asyncio, 'sleep', paused)
+        link_pilot.install_link_pilot(runtime.bot, runtime.env, tmp_path)
+        listener = runtime.listeners[0]
+        first = asyncio.create_task(listener(runtime.make(100)))
+        await entered.wait()
+        ineligible = [runtime.make(mid, guild_id=11 if invalid_kind == 'foreign_guild' else 10)
+                      for mid in (101, 102)]
+        for item in ineligible:
+            if invalid_kind == 'bot_mention': item.mentions.append(NS(id=99))
+            if invalid_kind == 'command': item.content = '/command'
+            if invalid_kind == 'stale': item.created_at -= timedelta(days=2)
+            if invalid_kind == 'short': item.content = '?'
+        invalid = [asyncio.create_task(listener(item)) for item in ineligible]
+        await real_sleep(0)
+        valid = asyncio.create_task(listener(runtime.make(103)))
+        await real_sleep(0)
+        release.set()
+        await asyncio.gather(first, *invalid, valid)
+    asyncio.run(run())
+    entries = PilotState(tmp_path/'barman/link-pilot.json').entries
+    assert set(entries) == {'100', '103'}
+    assert all(entry['status'] == 'unverified_or_stale' for entry in entries.values())
+
+
+def test_owner_reply_updates_fast_followup_cache_without_queue_admission(tmp_path, monkeypatch):
+    import asyncio
+    from barman import link_pilot
+    runtime = pilot_runtime(tmp_path)
+    prior = runtime.make(10, mentions=(), text='Prior public question')
+    owner = runtime.make(20, uid=7, mentions=(), parent=prior, text='Public answer')
+    current = runtime.make(100, mentions=(), text='And when?')
+    researched = []
+    async def no_sleep(_): pass
+    async def research(question, *args, **kwargs):
+        researched.append(question)
+        return {'url': None, 'status': 'skip', 'audit': {}}
+    monkeypatch.setattr(link_pilot.asyncio, 'sleep', no_sleep)
+    monkeypatch.setattr(link_pilot, 'find_reference', research)
+    link_pilot.install_link_pilot(runtime.bot, runtime.env, tmp_path)
+    async def run():
+        for message in (prior, owner, current): await runtime.listeners[0](message)
+    asyncio.run(run())
+    assert researched == ['And when?']
+    assert set(PilotState(tmp_path/'barman/link-pilot.json').entries) == {'100'}

@@ -12,7 +12,10 @@ from pathlib import Path
 import tempfile
 from urllib.parse import urlsplit
 
-from .chat import answer_owner, decode_payload, redact
+from .chat import decode_payload, redact
+from .conversation import collect_episode
+from .link_research import find_reference
+from .screenshots import prepare_screenshot
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ class PilotSettings:
             return None
 
 
-def eligible(message, settings, guild_id, bot_id, now, *, reference_author=''):
+def scoped_human(message, settings, guild_id, bot_id, now):
     author = getattr(message, 'author', None)
     guild = getattr(message, 'guild', None)
     mentions = {str(u.id) for u in getattr(message, 'mentions', [])}
@@ -46,8 +49,45 @@ def eligible(message, settings, guild_id, bot_id, now, *, reference_author=''):
                 and guild_id and guild and str(guild.id) == guild_id and author
                 and not author.bot and str(author.id) != settings.owner and not getattr(message, 'webhook_id', None)
                 and bot_id and bot_id not in mentions and len((message.content or '').strip()) >= 3
-                and not message.content.lstrip().startswith('/')
-                and (settings.owner in mentions or reference_author == settings.owner))
+                and not message.content.lstrip().startswith('/'))
+
+
+def eligible(message, settings, guild_id, bot_id, now, *, reference_author=''):
+    mentions = {str(u.id) for u in getattr(message, 'mentions', [])}
+    return scoped_human(message, settings, guild_id, bot_id, now) and (
+        settings.owner in mentions or reference_author == settings.owner)
+
+
+async def prepare_images(attachments, scrub):
+    import aiohttp
+    images = []
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), trust_env=False) as http:
+        for attachment in attachments[:2]:
+            url = getattr(attachment, 'url', '')
+            parsed = urlsplit(url)
+            if (parsed.scheme != 'https' or parsed.hostname not in ('cdn.discordapp.com', 'media.discordapp.net')
+                    or parsed.username or parsed.password or parsed.port not in (None, 443)):
+                raise ValueError('untrusted attachment location')
+            if getattr(attachment, 'size', 0) > 8 * 1024 * 1024:
+                raise ValueError('oversized screenshot')
+            if getattr(attachment, 'is_spoiler', lambda: False)():
+                raise ValueError('spoiler screenshot excluded')
+            kind = getattr(attachment, 'content_type', '') or ''
+            if not kind.startswith('image/'):
+                continue
+            chunks = []; size = 0
+            async with http.get(url, allow_redirects=False) as response:
+                if response.status != 200: raise ValueError('screenshot download failed')
+                async for chunk in response.content.iter_chunked(16384):
+                    size += len(chunk)
+                    if size > 8 * 1024 * 1024: raise ValueError('oversized screenshot')
+                    chunks.append(chunk)
+            prepared = await prepare_screenshot(b''.join(chunks), scrub)
+            if not prepared['face_detection_available']:
+                raise ValueError('local privacy filter unavailable')
+            # OCR text is deliberately not forwarded: unknown player labels can be private.
+            images.append({'image_url': prepared['image_url']})
+    return images
 
 
 def parse_decision(content):
@@ -205,6 +245,7 @@ def install_link_pilot(bot, env, home):
     bot._barman_link_pilot_installed = True
     lock = asyncio.Lock()
     pending = 0
+    recent_speakers = {}
 
     async def process(message):
         async with lock:
@@ -215,32 +256,22 @@ def install_link_pilot(bot, env, home):
                 guild_id = str(scope.guild.id) if scope and getattr(scope, 'guild', None) else ''
                 bot_id = str(bot.user.id) if bot.user else ''
                 now = datetime.now(timezone.utc)
-                ref = getattr(message, 'reference', None)
-                same_channel = ref and getattr(ref, 'channel_id', None) == message.channel.id
-                parent = getattr(ref, 'resolved', None) if same_channel else None
-                # Resolve only a same-channel reply, never another channel or a link supplied in text.
-                if same_channel and parent is None:
-                    if message.guild and str(message.guild.id) == guild_id:
-                        parent = await message.channel.fetch_message(ref.message_id)
-                reference_author = str(getattr(getattr(parent, 'author', None), 'id', ''))
-                if not eligible(message, settings, guild_id, bot_id, now, reference_author=reference_author): return
+                if not scoped_human(message, settings, guild_id, bot_id, now): return
+                episode = await collect_episode(message, settings.owner, bot)
+                if not episode.addressed: return
                 if not state.reserve(mid, str(message.author.id), str(message.channel.id), now): return
                 reserved = True
                 original = message.content
-                context_items = []
-                if reference_author == settings.owner:
-                    nearby = [m async for m in message.channel.history(limit=30, before=message, oldest_first=False)]
-                    context_items = episode_context(parent, nearby, settings.owner, message)
-                context_snapshot = [(m.id, m.content or '') for m in context_items]
 
                 async def still_needed():
                     if not settings.start <= datetime.now(timezone.utc) < settings.until: return False
                     if not state.can_send(str(message.author.id), datetime.now(timezone.utc)): return False
                     current = await message.channel.fetch_message(message.id)
                     if current.content != original: return False
-                    for context_id, text in context_snapshot:
-                        current_parent = await message.channel.fetch_message(context_id)
-                        if current_parent.content != text: return False
+                    for snapshot in episode.snapshots:
+                        current_parent = await message.channel.fetch_message(snapshot['message_id'])
+                        if current_parent.content != snapshot['content']: return False
+                        if tuple(a.id for a in getattr(current_parent, 'attachments', [])) != snapshot['attachment_ids']: return False
                     after = [m async for m in message.channel.history(limit=30, after=message, oldest_first=False)]
                     if len(after) == 30: return False  # too much traffic to prove no one answered
                     return not any(str(m.author.id) == settings.owner or
@@ -253,23 +284,33 @@ def install_link_pilot(bot, env, home):
                     return
                 names = [value for member in message.guild.members for value in
                          (getattr(member, 'name', ''), getattr(member, 'display_name', ''), getattr(member, 'global_name', ''))]
+                for item in episode.messages:
+                    member = item['message'].author
+                    names.extend((getattr(member, 'name', ''), getattr(member, 'display_name', ''),
+                                  getattr(member, 'global_name', '')))
                 # Only public vocabulary, not character biography or speech instructions.
                 glossary = '\n'.join(line for line in (home / 'SOUL.md').read_text().splitlines()
                                      if line.startswith('- Сленг сервера:'))
-                packed = anonymized_context([text for _, text in context_snapshot], env, names=names)
-                query = await classify(original, packed, env, names=names, glossary=glossary)
-                if not query:
-                    state.finish(mid, 'not_link_question')
+                scrub = lambda text: anonymize(text, env, names=names)
+                packed = anonymized_context([m['role'] + ': ' + m['text'] for m in episode.messages if m['message'].id != message.id], env, names=names)
+                images = await prepare_images(episode.attachments, scrub) if episode.attachments else []
+                if not await still_needed():
+                    state.finish(mid, 'owner_answered_or_stale')
                     return
-                url = await answer_owner(message, query, env, home, link_only=True, before_send=still_needed,
-                                         link_context={'question': anonymize(original, env, names=names),
-                                                       'context': packed})
-                if url:
+                result = await find_reference(original, packed, env, images=images, glossary=glossary,
+                                              channel_hint=episode.topic_hint, scrub=scrub,
+                                              before_request=still_needed)
+                url = result.get('url')
+                if url and await still_needed():
+                    import discord
+                    sent = await message.reply(f'<{url}>', mention_author=False,
+                                               allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
                     parts = urlsplit(url)
                     state.finish(mid, 'sent', sent_at=datetime.now(timezone.utc).isoformat(),
-                                 source=f'{parts.scheme}://{parts.netloc}{parts.path}')
+                                 source=f'{parts.scheme}://{parts.netloc}{parts.path}', reply_message_id=str(sent.id),
+                                 images=len(images), research=result['audit'])
                 else:
-                    state.finish(mid, 'unverified_or_stale')
+                    state.finish(mid, 'unverified_or_stale', outcome=result['status'], research=result['audit'])
             except Exception as error:
                 log.warning('barman: link pilot failed error_type=%s', type(error).__name__)
                 if reserved:
@@ -278,10 +319,25 @@ def install_link_pilot(bot, env, home):
 
     async def on_message(message):
         nonlocal pending
-        # Queue only plausible owner-directed traffic; one worker, at most three pending.
-        if (not message.guild or message.author.bot or getattr(message, 'webhook_id', None)
-                or str(message.author.id) == settings.owner): return
-        if settings.owner not in {str(u.id) for u in message.mentions} and not getattr(message, 'reference', None): return
+        if not message.guild or message.author.bot or getattr(message, 'webhook_id', None): return
+        try:
+            scope = bot.get_channel(int(env.get('BARMAN_SCOPE_CHANNEL') or env.get('BARMAN_ROLES_CHANNEL', '0')))
+        except (TypeError, ValueError):
+            return
+        guild_id = str(scope.guild.id) if scope and getattr(scope, 'guild', None) else ''
+        bot_id = str(bot.user.id) if bot.user else ''
+        if not guild_id or str(message.guild.id) != guild_id: return
+        now = datetime.now(timezone.utc)
+        key = (str(message.guild.id), str(message.channel.id))
+        previous = recent_speakers.get(key)
+        recent_speakers[key] = (str(message.author.id), now, bool(getattr(message, 'reference', None)))
+        if len(recent_speakers) > 128: recent_speakers.pop(next(iter(recent_speakers)))
+        if str(message.author.id) == settings.owner: return
+        if not scoped_human(message, settings, guild_id, bot_id, now): return
+        explicit = settings.owner in {str(u.id) for u in message.mentions} or getattr(message, 'reference', None)
+        possible_followup = previous is None or (previous[0] == settings.owner and previous[2]
+                                                 and datetime.now(timezone.utc) - previous[1] < timedelta(minutes=5))
+        if not explicit and not possible_followup: return
         if pending >= 3:
             log.info('barman: link_pilot_audit %s', json.dumps({'message_id': str(message.id), 'status': 'queue_full'}))
             return
