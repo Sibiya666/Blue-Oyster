@@ -43,11 +43,16 @@ def register(ctx) -> None:
                                  sync_app_commands, sync_text, unbind_error)
 
     env = _env(home)
+    from .chat import install_chat_hooks
+    runtime = {"bot": None}
+    install_chat_hooks(ctx, env, home, lambda: runtime["bot"])
     channel = env.get("BARMAN_ROLES_CHANNEL", "")
     bindings = Bindings(home / "barman" / "bindings.json")
 
     def factory(bot, adapter=None):
         import discord  # внутри Hermes
+
+        runtime["bot"] = bot
 
         reason = "Бармен: роль по реакции"
         burst = discord.ReactionType.burst  # супер-реакции discord.py по умолчанию не перечисляет
