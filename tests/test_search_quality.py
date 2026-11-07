@@ -86,6 +86,25 @@ def test_domain_filter_checks_boundaries_not_substrings():
     assert source_url(annotation("https://ru.pathofexile.com/forum/view-forum/news"), ("pathofexile.com",))
 
 
+def test_vague_poe_question_cannot_bypass_source_checks():
+    assert search_policy("таки что там по поешечке").requires_evidence
+    reply = render_search_reply(result(url="https://dtf.ru/funpay/spam"), "таки что там по поешечке")
+    assert reply["status"] == "unverified_fresh"
+    assert search_policy("Почему в PoE 2 не работает торговля?").requires_evidence
+    assert render_search_reply(result(count=0), "Почему в PoE 2 не работает торговля?")["status"] == "unverified_fresh"
+
+
+def test_official_announcement_section_is_allowed_but_general_forum_is_not():
+    data = result(url="https://www.pathofexile.com/forum/view-thread/3999366")
+    citation = data["choices"][0]["message"]["annotations"][0]["url_citation"]
+    citation["title"] = "Early Access Announcements - Path of Exile 2 Fully Releases on December 11! - Forum - Path of Exile"
+    assert render_search_reply(data, "Когда полный релиз PoE 2?")["status"] == "verified_search"
+    citation["title"] = "General Discussion - Early Access Announcements - Fan predictions - Forum"
+    assert render_search_reply(data, "Когда полный релиз PoE 2?")["status"] == "unverified_fresh"
+    citation["title"] = "Announcements - First game news - Forum - Path of Exile"
+    assert render_search_reply(data, "Когда полный релиз PoE 2?")["status"] == "unverified_fresh"
+
+
 @pytest.fixture
 def reply_path(tmp_path, monkeypatch):
     from barman.chat import answer_owner

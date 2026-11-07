@@ -60,11 +60,15 @@ RULES = (
     " Не добавляй имена авторов, служебные детали проверки и советы 'проверь сам', если их не просили."
     " В этой конфе 'поешка', 'поешечка' и 'пое' без номера обычно означают Path of Exile 2. "
     "Не спрашивай, что значит этот сленг. Явное указание первой части важнее этого умолчания."
+    " Указывая дату поста, бери дату публикации первого сообщения разработчика, "
+    "не дату редактирования, последнего комментария или Last bumped. "
+    "Указанную разработчиком часовую зону сохраняй; не вычисляй время выхода по одной дате."
+    " Не превращай 'upcoming announcement' и 'поддержку будущего анонса' в уже состоявшийся анонс или релиз."
 )
 
 
-def build_request(soul: str, text: str, model: str) -> dict:
-    policy = search_policy(text)
+def build_request(soul: str, text: str, model: str, *, game_hint: str | None = None) -> dict:
+    policy = search_policy(text, game_hint=game_hint)
     params = {"engine": "exa", "max_results": 3, "max_total_results": 3,
               "max_uses": 1, "max_characters": 1500}
     if policy.domains:
@@ -111,7 +115,17 @@ def source_url(annotations: list, allowed_domains: tuple[str, ...] = (), *, game
                 if game != "Path of Exile":
                     indices.add("/forum/view-forum/2212")  # official PoE 2 Early Access Patch Notes
                 if parsed.path.rstrip("/") not in indices:
-                    continue
+                    # Official announcements/patches are themselves threads. The search provider's
+                    # page-title category must be official, not player text or a matching substring.
+                    title = (item.get("url_citation") or {}).get("title", "")
+                    prefixes = []
+                    if game != "Path of Exile":
+                        prefixes.extend(("early access announcements - ", "early access patch notes - "))
+                    if game != "Path of Exile 2":
+                        prefixes.extend(("announcements - ", "patch notes - "))
+                    official_section = isinstance(title, str) and title.lower().startswith(tuple(prefixes))
+                    if not (re.fullmatch(r"/forum/view-thread/[0-9]+(?:/filter-account-type/staff)?/?", parsed.path) and official_section):
+                        continue
             if (parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443)
                     or not host or "." not in host or len(url) > 300
                     or host.endswith((".local", ".internal", ".localhost", ".test", ".invalid"))
@@ -128,9 +142,9 @@ def source_url(annotations: list, allowed_domains: tuple[str, ...] = (), *, game
     return None
 
 
-def render_search_reply(data: dict, text: str) -> dict:
+def render_search_reply(data: dict, text: str, *, game_hint: str | None = None) -> dict:
     """A positive provider counter is evidence of retrieval, not proof of all factual claims."""
-    policy = search_policy(text)
+    policy = search_policy(text, game_hint=game_hint)
     message = data["choices"][0]["message"]
     count = (data.get("usage", {}).get("server_tool_use_details") or {}).get("web_search_requests")
     if type(count) is not int or count < 0:
@@ -139,7 +153,7 @@ def render_search_reply(data: dict, text: str) -> dict:
     verified = bool(count and source)
     status = "verified_search" if verified else ("no_search" if count == 0 else "unobserved_search")
     prose = clean_answer(message.get("content"))
-    if policy.requires_evidence and not verified:
+    if (policy.requires_evidence or message.get("annotations") or count) and not verified:
         prose = "Не смогла подтвердить свежие данные надёжным источником."
         source = None
         status = "unverified_fresh"
@@ -153,10 +167,10 @@ def render_search_reply(data: dict, text: str) -> dict:
             "generation_id": str(data.get("id") or "")[:120], "status": status}
 
 
-async def answer_owner(message, text: str, env: dict, home: Path) -> None:
+async def answer_owner(message, text: str, env: dict, home: Path, *, game_hint: str | None = None) -> None:
     import aiohttp  # provided by Hermes, like discord.py
 
-    policy = search_policy(text)
+    policy = search_policy(text, game_hint=game_hint)
     result = {"prose": policy.clarification, "source": None, "web_search_requests": 0,
               "generation_id": "", "status": "clarification"}
     if not policy.clarification:
@@ -164,7 +178,7 @@ async def answer_owner(message, text: str, env: dict, home: Path) -> None:
         try:
             soul = (home / "SOUL.md").read_text(encoding="utf-8")
             body = build_request(soul, text, env.get("BARMAN_SEARCH_MODEL")
-                                 or env.get("BARMAN_COMMENT_MODEL") or "anthropic/claude-haiku-5.5")
+                                 or env.get("BARMAN_COMMENT_MODEL") or "anthropic/claude-haiku-5.5", game_hint=game_hint)
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as http:
                 async with http.post("https://openrouter.ai/api/v1/chat/completions", json=body,
                                      headers={"Authorization": f"Bearer {env['OPENROUTER_API_KEY']}"},
@@ -173,7 +187,7 @@ async def answer_owner(message, text: str, env: dict, home: Path) -> None:
                     if response.status != 200:
                         raise ValueError("unexpected search response")
                     data = await response.json()
-            result = render_search_reply(data, text)
+            result = render_search_reply(data, text, game_hint=game_hint)
         except Exception:
             log.warning("barman: owner search request failed")
             result.update(prose="С поиском сейчас не вышло. Попробуй позже.", status="search_error",
@@ -183,6 +197,7 @@ async def answer_owner(message, text: str, env: dict, home: Path) -> None:
         reply += f"\n<{result['source']}>"
     import discord
     audit = {"message_id": str(getattr(message, "id", "")), "generation_id": result["generation_id"],
+             "game": policy.game, "context_used": game_hint is not None,
              "web_search_requests": result["web_search_requests"], "status": result["status"],
              "chars": len(reply), "prose_chars": len(result["prose"]), "sentences": len([p for p in re.split(
                  r"(?<=[!?])(?=[^!?])|(?<=\.)(?=\s|[А-ЯЁA-Z])|\n+", result["prose"]) if p.strip()])}
@@ -208,6 +223,8 @@ def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> N
     """
     pending = 0
     lock = asyncio.Lock()
+    from .dialogue import TopicMemory
+    topics = TopicMemory()
 
     async def dispatch(*, event, **kwargs):
         nonlocal pending
@@ -229,6 +246,7 @@ def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> N
                 return {"action": "skip", "reason": "barman: no mention"}
             # Commands remain subject to Hermes' existing administrative locks.
             text = getattr(message, "content", "") or ""
+            text = text.replace(f"<@{self_id}>", "").replace(f"<@!{self_id}>", "").strip()
             if text.lstrip().startswith("/") or not policy.can_search(message):
                 return None
             if pending < 3:
@@ -238,10 +256,13 @@ def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> N
                     nonlocal pending
                     try:
                         async with lock:
+                            key = (str(message.guild.id), str(getattr(getattr(message, "channel", None), "id", "")),
+                                   str(message.author.id))
+                            resolved = topics.resolve(key, text)
                             if answer:
-                                await answer(message, text)
+                                await answer(message, resolved.text)
                             else:
-                                await answer_owner(message, text, env, home)
+                                await answer_owner(message, resolved.text, env, home, game_hint=resolved.game_hint)
                     except Exception:
                         log.warning("barman: owner reply delivery failed")
                     finally:
