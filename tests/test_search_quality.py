@@ -55,6 +55,14 @@ def test_verified_search_has_count_and_developer_source():
     assert reply["source"].startswith("https://www.pathofexile.com/")
 
 
+def test_token_truncated_reply_is_not_published_as_verified_fact():
+    data = result(answer="Последний патч 3.29.3c, автор Kieren_GG")
+    data["choices"][0]["finish_reason"] = "length"
+    reply = render_search_reply(data, "Какая версия PoE 2?")
+    assert reply["status"] == "truncated_response"
+    assert reply["source"] is None and "Kieren" not in reply["prose"]
+
+
 @pytest.mark.parametrize("question", ["Сколько стоит Diablo IV?", "Какая версия PoE 2?",
     "Когда выйдет новая лига PoE 2? И пошути в конце.", "Когда выйдет PoE 2? И пошути в конце."])
 def test_current_factual_questions_cannot_skip_search_or_disable_it_with_a_joke(question):

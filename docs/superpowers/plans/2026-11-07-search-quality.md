@@ -7,4 +7,4 @@ Keep the current isolated OpenRouter path and existing Discord-ID permission che
 - [x] Regression tests: screenshot prompt, official-domain filtering, missing/zero usage, rejected DTF/lookalike domains, two-sentence fallback; price/version and mixed factual/joke requests.
 - [x] Implement pure search policy, integrate evidence checks and current date, and log delivered-reply audit metadata without conversation contents or credentials.
 - [ ] Mocked reply-path tests and real API checks on the test container without publishing Discord messages.
-- [x] Full pytest (133 passed), review with no remaining blockers. PR and staging verification follow. No merge or production deployment without a further user instruction.
+- [x] Full pytest (134 passed), review with no remaining blockers. Live staging found token-budget truncation; add headroom without increasing prose length and reject `finish_reason=length`. Final staging verification follows. No merge or production deployment without a further user instruction.

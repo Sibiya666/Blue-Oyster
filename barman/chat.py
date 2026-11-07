@@ -57,6 +57,7 @@ RULES = (
     "Отвечай на вопрос по существу, не заменяй ответ фразой 'смотри официальные новости'."
     " Для PoE подтверждай даты официальной главной, новостями и списком патчей; "
     "отдельная форумная ветка без проверенного автора не считается официальной."
+    " Не добавляй имена авторов, служебные детали проверки и советы 'проверь сам', если их не просили."
 )
 
 
@@ -71,7 +72,7 @@ def build_request(soul: str, text: str, model: str) -> dict:
         {"role": "system", "content": soul + "\n\n" + RULES + f"\nСегодня {today} (Москва)."},
         {"role": "user", "content": text[:2000]}],
         "tools": [{"type": "openrouter:web_search", "parameters": params}],
-        "max_tokens": 250, "temperature": 0.5}
+        "max_tokens": 500, "temperature": 0.5}
 
 
 def clean_answer(text: str) -> str:
@@ -131,6 +132,10 @@ def render_search_reply(data: dict, text: str) -> dict:
         prose = "Не смогла подтвердить свежие данные надёжным источником."
         source = None
         status = "unverified_fresh"
+    if data["choices"][0].get("finish_reason") == "length":
+        prose = "Проверка не дала полного ответа. Повтори запрос."
+        source = None
+        status = "truncated_response"
     if not verified:
         source = None
     return {"prose": prose, "source": source, "web_search_requests": count,
