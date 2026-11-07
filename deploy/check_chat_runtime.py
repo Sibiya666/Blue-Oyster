@@ -18,6 +18,9 @@ def check(home: Path):
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    env = module._env(home)
+    scope = env.get("BARMAN_SCOPE_CHANNEL") or env.get("BARMAN_ROLES_CHANNEL", "")
+    assert scope.isdecimal() and int(scope) > 0, "configure a server scope channel before widening access"
     hooks = {}
     ctx = SimpleNamespace(_manager=SimpleNamespace(home_path=home),
                           register_platform_handler=lambda *args: None,

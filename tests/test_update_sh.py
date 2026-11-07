@@ -93,11 +93,12 @@ def test_prod_default_target_untouched(fake):
 
 def test_all_channels_and_owner_are_set_only_after_runtime_probe(fake):
     tmp, env, prod = _prod(fake)
-    r = _run(env, BARMAN_DATA=str(prod), BARMAN_SEARCH_OWNER="7", BARMAN_AI_USERS="7,8")
+    r = _run(env, BARMAN_DATA=str(prod), BARMAN_SEARCH_OWNER="7", BARMAN_AI_USERS="7,8", BARMAN_AI_CHANNELS="50,51")
     assert r.returncode == 0, r.stdout + r.stderr
     dotenv = dict(line.split("=", 1) for line in (prod / ".env").read_text().splitlines())
     assert dotenv["DISCORD_ALLOWED_CHANNELS"] == "*"
     assert dotenv["BARMAN_SEARCH_OWNER"] == "7"
+    assert dotenv["BARMAN_SCOPE_CHANNEL"] == "50"
     assert dotenv["DISCORD_REQUIRE_MENTION"] == "true"
     assert dotenv["DISCORD_FREE_RESPONSE_CHANNELS"] == "0"
     assert dotenv["HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS"] == "0"

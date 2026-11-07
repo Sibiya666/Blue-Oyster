@@ -100,6 +100,8 @@ hermes_set platforms.discord.extra.thread_require_mention true
 hermes_set platforms.discord.extra.free_response_channels 0
 hermes_set platforms.discord.extra.auto_thread false
 hermes_set platform_toolsets.discord '[]'
+SCOPECH="${CH:-${AICH%%,*}}"
+[ -z "$SCOPECH" ] || set_env BARMAN_SCOPE_CHANNEL "$SCOPECH"
 ssh -i "$KEY" "root@$IP" "docker exec -i -u 10000 $CT python3 - /opt/data chat-policy-probe" < "$REPO/deploy/check_chat_runtime.py" \
   || { echo "Политика чата недоступна — каналы не расширяю"; exit 1; }
 hermes_set display.busy_input_mode queue  # дописал, пока бармен думает — отдельный ответ, без «перенаправил запуск»

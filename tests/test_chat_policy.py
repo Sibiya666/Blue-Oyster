@@ -45,6 +45,11 @@ def test_no_pings_or_untrusted_links():
     assert "@" not in result and "https://" not in result
 
 
+def test_domains_and_game_versions_are_not_sentence_boundaries():
+    text = "Сайт — pathofexile.com, патч 3.27.1 вышел. Проверь сам! Третье предложение."
+    assert clean_answer(text) == "Сайт — pathofexile.com, патч 3.27.1 вышел. Проверь сам!"
+
+
 @pytest.mark.parametrize("url", ["http://example.com", "https://127.0.0.1/x", "https://10.0.0.1",
                                  "https://service.internal/x", "https://user:pass@example.com/x",
                                  "https://example.com:8443/x", "https://example.com/<@123>"])

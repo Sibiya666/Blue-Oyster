@@ -57,10 +57,12 @@ def build_request(soul: str, text: str, model: str) -> dict:
 
 
 def clean_answer(text: str) -> str:
+    text = re.sub(r"\[[^\]]*\]\(https?://[^)]+\)", "", text or "", flags=re.I)
     text = _URL.sub("", text or "")
     text = re.sub(r"<@[^>]*>|@(?:everyone|here)|@", "", text)
     # Newlines also delimit short replies; punctuation need not have a following space.
-    parts = [p.strip() for p in re.findall(r"[^.!?\n]+[.!?]*", text) if p.strip()]
+    parts = [p.strip() for p in re.split(r"(?<=[!?])(?=[^!?])|(?<=\.)(?=\s|[А-ЯЁA-Z])|\n+", text)
+             if p.strip()]
     return " ".join(parts[:2])[:500].strip() or "Не удалось получить ответ."
 
 
@@ -134,7 +136,7 @@ def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> N
             return None
         try:
             bot = get_bot()
-            roles_id = env.get("BARMAN_ROLES_CHANNEL", "")
+            roles_id = env.get("BARMAN_SCOPE_CHANNEL") or env.get("BARMAN_ROLES_CHANNEL", "")
             channel = bot.get_channel(int(roles_id)) if bot and roles_id.isdecimal() else None
             guild = getattr(channel, "guild", None)
             policy = ChatPolicy(str(guild.id) if guild else "", env.get("BARMAN_SEARCH_OWNER", "0"),
