@@ -13,7 +13,7 @@ echo "docker $*" >> "$LOG"
 case "$1" in
   inspect) [ "$2" = barmen ] && { echo sha256:IMG; exit 0; }; [ -f "$STATE/$2" ] && exit 0; exit 1 ;;
   run) n=$(echo "$*" | sed -E 's/.*--name ([^ ]+).*/\\1/'); touch "$STATE/$n"; exit 0 ;;
-  exec) case "$*" in *"python3 -"*) [ -n "$STALE_IDS" ] && echo "$STALE_IDS"; exit 0 ;; esac
+  exec) case "$*" in *"chat-policy-probe"*) exit "${FAIL_CHAT_PROBE:-0}" ;; *"python3 -"*) [ -n "$STALE_IDS" ] && echo "$STALE_IDS"; exit 0 ;; esac
     shift 6
     if [ "$1" = set ]; then shift; [ "$1" = --force ] && shift; echo "$1=$2" >> "$CFG"; fi
     if [ "$1" = get ]; then grep "^$2=" "$CFG" | tail -1 | cut -d= -f2-; fi ;;
@@ -91,10 +91,40 @@ def test_prod_default_target_untouched(fake):
     assert "DISCORD_BOT_TOKEN=PROD" in (prod / ".env").read_text()
 
 
+def test_all_channels_and_owner_are_set_only_after_runtime_probe(fake):
+    tmp, env, prod = _prod(fake)
+    r = _run(env, BARMAN_DATA=str(prod), BARMAN_SEARCH_OWNER="7", BARMAN_SEARCH_USERS="7,8,9",
+             BARMAN_AI_USERS="7,8,9", BARMAN_AI_CHANNELS="50,51")
+    assert r.returncode == 0, r.stdout + r.stderr
+    dotenv = dict(line.split("=", 1) for line in (prod / ".env").read_text().splitlines())
+    assert dotenv["DISCORD_ALLOWED_CHANNELS"] == "*"
+    assert dotenv["BARMAN_SEARCH_OWNER"] == "7"
+    assert dotenv["BARMAN_SEARCH_USERS"] == "7,8,9"
+    assert dotenv["BARMAN_SCOPE_CHANNEL"] == "50"
+    assert dotenv["DISCORD_REQUIRE_MENTION"] == "true"
+    assert dotenv["DISCORD_FREE_RESPONSE_CHANNELS"] == "0"
+    assert dotenv["HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS"] == "0"
+    assert "platform_toolsets.discord=[]" in (tmp / "cfg").read_text()
+    assert "streaming.enabled=false" in (tmp / "cfg").read_text()
+    assert "chat-policy-probe" in (tmp / "log").read_text()
+
+
+def test_failed_chat_probe_does_not_widen_channels_or_restart(fake):
+    tmp, env, prod = _prod(fake)
+    with (prod / ".env").open("a") as f:
+        f.write("DISCORD_ALLOWED_CHANNELS=50\n")
+    r = _run(env, BARMAN_DATA=str(prod), FAIL_CHAT_PROBE="1")
+    assert r.returncode != 0
+    assert "DISCORD_ALLOWED_CHANNELS=50" in (prod / ".env").read_text()
+    assert "docker restart" not in (tmp / "log").read_text()
+
+
 @pytest.mark.parametrize("kw,msg", [
     ({"BARMAN_TARGET": "staging"}, "prod или test"),
     ({"BARMAN_TARGET": "test", "BARMAN_BOT_TOKEN": "x;rm -rf /"}, "токен"),
     ({"BARMAN_AI_USERS": "1;rm"}, "ID через запятую"),
+    ({"BARMAN_SEARCH_USERS": "7,,8"}, "Discord user ID"),
+    ({"BARMAN_SEARCH_USERS": "7;rm"}, "Discord user ID"),
 ])
 def test_rejects_garbage(fake, kw, msg):
     _, env = fake
