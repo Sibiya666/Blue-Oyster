@@ -276,6 +276,9 @@ def register(ctx) -> None:
         bot.add_listener(on_raw_reaction_clear, "on_raw_reaction_clear")
         bot.add_listener(on_raw_reaction_clear, "on_raw_reaction_clear_emoji")
 
+        from .link_pilot import install_link_pilot
+        install_link_pilot(bot, env, home)
+
         from .comments import CommentGate, parse_settings
         comment_settings = parse_settings(env)
         if comment_settings is None:

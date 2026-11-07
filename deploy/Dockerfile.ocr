@@ -1,0 +1,10 @@
+# Optional test/runtime image: screenshot text is detected and hidden locally.
+ARG BASE_IMAGE=barman-hermes-base:local
+FROM ${BASE_IMAGE}
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m ensurepip && python3 -m pip install --no-cache-dir "opencv-python-headless<5" "rapidocr==3.10.0" onnxruntime
+RUN python3 -c 'import hashlib,importlib.util,pathlib; p=pathlib.Path(importlib.util.find_spec("rapidocr").origin).parent/"models"/"PP-OCRv6_det_small.onnx"; assert hashlib.sha256(p.read_bytes()).hexdigest()=="090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f"'
+USER 10000:10000
