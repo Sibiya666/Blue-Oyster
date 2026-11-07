@@ -326,3 +326,63 @@ def test_owner_reply_updates_fast_followup_cache_without_queue_admission(tmp_pat
     asyncio.run(run())
     assert researched == ['And when?']
     assert set(PilotState(tmp_path/'barman/link-pilot.json').entries) == {'100'}
+
+
+@pytest.mark.parametrize('mode', [None, 'log', 'invalid'])
+def test_observation_mode_records_exact_candidate_without_discord_send(tmp_path, monkeypatch, mode):
+    import asyncio
+    from barman import link_pilot
+    runtime = pilot_runtime(tmp_path)
+    if mode is not None: runtime.env['BARMAN_LINK_PILOT_MODE'] = mode
+    message = runtime.make(100, text='Private original question')
+    async def no_sleep(_): pass
+    async def forbidden_send(*args, **kwargs): pytest.fail('observation mode must never send')
+    async def research(*args, **kwargs):
+        return {'status':'grounded','url':'https://example.com/manual','verdict':'yes','audit':{}}
+    import sys
+    monkeypatch.setitem(sys.modules, 'discord', NS(AllowedMentions=NS(none=lambda:None)))
+    message.reply = forbidden_send
+    monkeypatch.setattr(link_pilot.asyncio, 'sleep', no_sleep)
+    monkeypatch.setattr(link_pilot, 'find_reference', research)
+    link_pilot.install_link_pilot(runtime.bot, runtime.env, tmp_path)
+    asyncio.run(runtime.listeners[0](message))
+    entry = PilotState(tmp_path/'barman/link-pilot.json').entries['100']
+    assert entry['status'] == 'logged'
+    assert entry['candidate_reply'] == 'Да. <https://example.com/manual>'
+    assert 'reply_message_id' not in entry
+    assert 'Private original question' not in repr(entry)
+
+
+def test_logged_candidates_keep_the_same_cooldown_and_daily_limit(tmp_path):
+    now = datetime.now(timezone.utc)
+    state = PilotState(tmp_path/'pilot.json')
+    assert state.reserve('1', '8', '20', now)
+    state.finish('1', 'logged', decided_at=now.isoformat(), candidate_reply='Да. <https://example.com/manual>')
+    assert not state.can_send('8', now+timedelta(minutes=20))
+    assert state.can_send('8', now+timedelta(hours=1))
+    for i in range(2, 11):
+        assert state.reserve(str(i), str(i+10), '20', now)
+        state.finish(str(i), 'logged', decided_at=now.isoformat())
+    assert not state.can_send('fresh_user', now)
+
+
+def test_only_explicit_post_mode_sends_and_records_delivery(tmp_path, monkeypatch):
+    import asyncio,sys
+    from barman import link_pilot
+    runtime = pilot_runtime(tmp_path)
+    runtime.env['BARMAN_LINK_PILOT_MODE'] = 'post'
+    message = runtime.make(100)
+    sent=[]
+    async def no_sleep(_): pass
+    async def reply(content, **kwargs): sent.append(content);return NS(id=123)
+    async def research(*args, **kwargs):
+        return {'status':'grounded','url':'https://example.com/manual','verdict':'no','audit':{}}
+    message.reply=reply
+    monkeypatch.setitem(sys.modules,'discord',NS(AllowedMentions=NS(none=lambda:None)))
+    monkeypatch.setattr(link_pilot.asyncio,'sleep',no_sleep)
+    monkeypatch.setattr(link_pilot,'find_reference',research)
+    link_pilot.install_link_pilot(runtime.bot,runtime.env,tmp_path)
+    asyncio.run(runtime.listeners[0](message))
+    assert sent==['Нет. <https://example.com/manual>']
+    entry=PilotState(tmp_path/'barman/link-pilot.json').entries['100']
+    assert entry['status']=='sent' and entry['reply_message_id']=='123'
