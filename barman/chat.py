@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 import ipaddress
+import json
 import logging
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
+
+from .search_policy import search_policy
 
 log = logging.getLogger(__name__)
 _tasks: set = set()
@@ -46,16 +51,26 @@ RULES = (
     "У тебя нет доступа к файлам, терминалу, ключам и другим инструментам. "
     "Не притворяйся, что поиск сработал, если результатов нет. "
     "Не вставляй ссылки в текст: приложение добавит проверенный источник отдельно."
+    " Не угадывай часть игры, лигу и смысл неоднозначного вопроса: коротко уточни. "
+    "Свежие даты, версии и патчи проверяй поиском, на страницах разработчика; не по рекламе, "
+    "постам пользователей и пересказам. Если дата не подтверждена, не выдумывай её. "
+    "Отвечай на вопрос по существу, не заменяй ответ фразой 'смотри официальные новости'."
+    " Для PoE подтверждай даты официальной главной, новостями и списком патчей; "
+    "отдельная форумная ветка без проверенного автора не считается официальной."
 )
 
 
 def build_request(soul: str, text: str, model: str) -> dict:
+    policy = search_policy(text)
+    params = {"engine": "exa", "max_results": 3, "max_total_results": 3,
+              "max_uses": 1, "max_characters": 1500}
+    if policy.domains:
+        params["allowed_domains"] = list(policy.domains)
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
     return {"model": model, "messages": [
-        {"role": "system", "content": soul + "\n\n" + RULES},
+        {"role": "system", "content": soul + "\n\n" + RULES + f"\nСегодня {today} (Москва)."},
         {"role": "user", "content": text[:2000]}],
-        "tools": [{"type": "openrouter:web_search", "parameters": {
-            "engine": "exa", "max_results": 3, "max_total_results": 3,
-            "max_uses": 1, "max_characters": 1500}}],
+        "tools": [{"type": "openrouter:web_search", "parameters": params}],
         "max_tokens": 250, "temperature": 0.5}
 
 
@@ -69,7 +84,7 @@ def clean_answer(text: str) -> str:
     return " ".join(parts[:2])[:500].strip() or "Не удалось получить ответ."
 
 
-def source_url(annotations: list) -> str | None:
+def source_url(annotations: list, allowed_domains: tuple[str, ...] = ()) -> str | None:
     """Only provider citations, not model-generated links. Never fetch these URLs locally."""
     for item in annotations:
         if not isinstance(item, dict) or item.get("type") != "url_citation":
@@ -78,6 +93,13 @@ def source_url(annotations: list) -> str | None:
         try:
             parsed = urlsplit(url)
             host = (parsed.hostname or "").lower().rstrip(".")
+            if allowed_domains and not any(host == d or host.endswith("." + d) for d in allowed_domains):
+                continue
+            # PoE forum threads may be written by any user. Without an authenticated author,
+            # accept only the developer's landing/news/patch-note index on its community domain.
+            if allowed_domains and (host == "pathofexile.com" or host.endswith(".pathofexile.com")):
+                if parsed.path.rstrip("/") not in ("", "/news", "/forum/view-forum/news", "/forum/view-forum/patch-notes"):
+                    continue
             if (parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443)
                     or not host or "." not in host or len(url) > 300
                     or host.endswith((".local", ".internal", ".localhost", ".test", ".invalid"))
@@ -94,34 +116,72 @@ def source_url(annotations: list) -> str | None:
     return None
 
 
+def render_search_reply(data: dict, text: str) -> dict:
+    """A positive provider counter is evidence of retrieval, not proof of all factual claims."""
+    policy = search_policy(text)
+    message = data["choices"][0]["message"]
+    count = (data.get("usage", {}).get("server_tool_use_details") or {}).get("web_search_requests")
+    if type(count) is not int or count < 0:
+        count = None
+    source = source_url(message.get("annotations") or [], policy.domains)
+    verified = bool(count and source)
+    status = "verified_search" if verified else ("no_search" if count == 0 else "unobserved_search")
+    prose = clean_answer(message.get("content"))
+    if policy.requires_evidence and not verified:
+        prose = "Не смогла подтвердить свежие данные надёжным источником."
+        source = None
+        status = "unverified_fresh"
+    if not verified:
+        source = None
+    return {"prose": prose, "source": source, "web_search_requests": count,
+            "generation_id": str(data.get("id") or "")[:120], "status": status}
+
+
 async def answer_owner(message, text: str, env: dict, home: Path) -> None:
     import aiohttp  # provided by Hermes, like discord.py
 
-    # Nothing from .env except the model ID enters the prompt. The key is only an HTTP header.
-    try:
-        soul = (home / "SOUL.md").read_text(encoding="utf-8")
-        body = build_request(soul, text, env.get("BARMAN_SEARCH_MODEL")
-                             or env.get("BARMAN_COMMENT_MODEL") or "anthropic/claude-haiku-5.5")
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as http:
-            async with http.post("https://openrouter.ai/api/v1/chat/completions", json=body,
-                                 headers={"Authorization": f"Bearer {env['OPENROUTER_API_KEY']}"},
-                                 allow_redirects=False) as response:
-                response.raise_for_status()
-                if response.status != 200:
-                    raise ValueError("unexpected search response")
-                data = await response.json()
-        result = data["choices"][0]["message"]
-        reply = clean_answer(result.get("content"))
-        source = source_url(result.get("annotations") or [])
-        if source:
-            reply += f"\n<{source}>"
-    except Exception:
-        # Don't log provider bodies, request text or credentials.
-        log.warning("barman: owner search request failed")
-        reply = "С поиском сейчас не вышло. Попробуй позже."
+    policy = search_policy(text)
+    result = {"prose": policy.clarification, "source": None, "web_search_requests": 0,
+              "generation_id": "", "status": "clarification"}
+    if not policy.clarification:
+        # The key is an HTTP header only; no channel history or .env enters the prompt.
+        try:
+            soul = (home / "SOUL.md").read_text(encoding="utf-8")
+            body = build_request(soul, text, env.get("BARMAN_SEARCH_MODEL")
+                                 or env.get("BARMAN_COMMENT_MODEL") or "anthropic/claude-haiku-5.5")
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as http:
+                async with http.post("https://openrouter.ai/api/v1/chat/completions", json=body,
+                                     headers={"Authorization": f"Bearer {env['OPENROUTER_API_KEY']}"},
+                                     allow_redirects=False) as response:
+                    response.raise_for_status()
+                    if response.status != 200:
+                        raise ValueError("unexpected search response")
+                    data = await response.json()
+            result = render_search_reply(data, text)
+        except Exception:
+            log.warning("barman: owner search request failed")
+            result.update(prose="С поиском сейчас не вышло. Попробуй позже.", status="search_error",
+                          web_search_requests=None)
+    reply = result["prose"]
+    if result["source"]:
+        reply += f"\n<{result['source']}>"
     import discord
-    await message.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
-                        suppress_embeds=True)
+    audit = {"message_id": str(getattr(message, "id", "")), "generation_id": result["generation_id"],
+             "web_search_requests": result["web_search_requests"], "status": result["status"],
+             "chars": len(reply), "prose_chars": len(result["prose"]), "sentences": len([p for p in re.split(
+                 r"(?<=[!?])(?=[^!?])|(?<=\.)(?=\s|[А-ЯЁA-Z])|\n+", result["prose"]) if p.strip()])}
+    if result["source"]:
+        url = urlsplit(result["source"])
+        audit["source"] = f"{url.scheme}://{url.netloc}{url.path}"  # no query strings/fragments in logs
+    try:
+        sent = await message.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
+                                   suppress_embeds=True)
+        audit.update(delivered=True, reply_message_id=str(getattr(sent, "id", "")))
+    except Exception:
+        audit["delivered"] = False
+        raise
+    finally:
+        log.info("barman: reply_audit %s", json.dumps(audit, ensure_ascii=True))
 
 
 def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> None:
