@@ -9,7 +9,7 @@ def check(home: Path):
     from hermes_cli.plugins import VALID_HOOKS
     required = {"pre_gateway_dispatch", "transform_llm_output"}
     assert required <= VALID_HOOKS, "Hermes lacks barman chat policy hooks"
-    import yaml
+    import hermes_yaml as yaml  # Hermes ships ruamel.yaml, not necessarily PyYAML.
     config = yaml.safe_load((home / "config.yaml").read_text())
     assert "barman" in config.get("plugins", {}).get("enabled", []), "barman plugin is not enabled"
     assert config.get("platform_toolsets", {}).get("discord") == [], "Discord toolset must be empty"
