@@ -66,3 +66,36 @@ def test_clean_reply_strips_pings_keeps_server_emoji_and_skips_empty():
     assert clean_reply("   ") is None
     assert clean_reply("SKIP") is None                                   # модель решила промолчать
     assert len(clean_reply("а" * 1000)) <= 300
+
+
+def test_temporary_permission_expires_at_the_exact_deadline():
+    settings=_settings(BARMAN_COMMENT_UNTIL=(T0+timedelta(hours=2)).isoformat())
+    gate=CommentGate(settings)
+    kwargs=dict(author_id='42',channel_id='7',content='Продолжение разговора',mentions_bot=False,author_is_bot=False,roll=0.0)
+    assert gate.should_comment(now=T0,**kwargs)
+    assert not gate.should_comment(now=T0+timedelta(hours=2),**kwargs)
+    assert not settings.active_at(T0+timedelta(hours=2,seconds=1))
+
+
+def test_invalid_or_naive_permission_deadline_never_becomes_unlimited():
+    for deadline in ('invalid','2026-11-07T20:15:03',''):
+        assert _settings(BARMAN_COMMENT_UNTIL=deadline) is None
+
+
+def test_temporary_conversation_allows_short_implicit_address_for_model_assessment():
+    kwargs=dict(author_id='42',channel_id='7',content='Бармен?',mentions_bot=False,author_is_bot=False,now=T0,roll=0.0)
+    assert CommentGate(_settings(BARMAN_COMMENT_UNTIL=(T0+timedelta(hours=2)).isoformat())).should_comment(**kwargs)
+    assert not CommentGate(_settings()).should_comment(**kwargs)
+
+
+def test_conversation_skip_does_not_consume_reply_cooldown_and_inflight_is_bounded():
+    gate=CommentGate(_settings(BARMAN_COMMENT_UNTIL=(T0+timedelta(hours=2)).isoformat(),BARMAN_COMMENT_COOLDOWN_MIN='1'))
+    kwargs=dict(author_id='42',channel_id='7',content='Продолжение разговора',mentions_bot=False,author_is_bot=False,roll=0.0)
+    gate.begin(T0)
+    assert not gate.should_comment(now=T0+timedelta(seconds=1),**kwargs)
+    gate.complete(T0+timedelta(seconds=2),posted=False)
+    assert gate.should_comment(now=T0+timedelta(seconds=3),**kwargs)
+    gate.begin(T0+timedelta(seconds=3))
+    gate.complete(T0+timedelta(seconds=4),posted=True)
+    assert not gate.should_comment(now=T0+timedelta(seconds=30),**kwargs)
+    assert gate.should_comment(now=T0+timedelta(seconds=65),**kwargs)
