@@ -43,6 +43,7 @@ jobs:
       BARMAN_AI_USERS: ${{ secrets.BARMAN_AI_USERS }}  # необязательные: разговор с ИИ бармена
       BARMAN_AI_CHANNELS: ${{ secrets.BARMAN_AI_CHANNELS }}
       BARMAN_SEARCH_OWNER: ${{ secrets.BARMAN_SEARCH_OWNER }}
+      BARMAN_SEARCH_USERS: ${{ secrets.BARMAN_SEARCH_USERS }}
       BARMAN_SOUL: ${{ secrets.BARMAN_SOUL }}
       BARMAN_EMOJI: ${{ secrets.BARMAN_EMOJI }}
       BARMAN_AI_MODEL: ${{ secrets.BARMAN_AI_MODEL }}

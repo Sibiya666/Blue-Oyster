@@ -1,4 +1,4 @@
-"""Политика разговора и изолированный поиск владельца. Никаких инструментов Hermes."""
+"""Политика разговора и изолированный поиск по списку ID. Никаких инструментов Hermes."""
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +19,7 @@ class ChatPolicy:
     guild_id: str
     owner_id: str
     allowed_users: str
+    search_users: str = ""  # explicit CSV overrides the legacy single-owner setting
 
     def in_server(self, message) -> bool:
         guild = getattr(message, "guild", None)
@@ -26,11 +27,13 @@ class ChatPolicy:
 
     def can_search(self, message) -> bool:
         author = getattr(message, "author", None)
+        search_ids = (self.search_users or self.owner_id).split(",")
+        if not all(uid.isdecimal() and int(uid) > 0 for uid in search_ids):
+            return False
         return bool(self.in_server(message) and author and not author.bot
                     and not getattr(message, "webhook_id", None)
-                    and self.owner_id.isdecimal() and int(self.owner_id) > 0
-                    and str(author.id) == self.owner_id
-                    and self.owner_id in self.allowed_users.split(","))
+                    and str(author.id) in search_ids
+                    and str(author.id) in self.allowed_users.split(","))
 
 
 RULES = (
@@ -140,7 +143,7 @@ def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> N
             channel = bot.get_channel(int(roles_id)) if bot and roles_id.isdecimal() else None
             guild = getattr(channel, "guild", None)
             policy = ChatPolicy(str(guild.id) if guild else "", env.get("BARMAN_SEARCH_OWNER", "0"),
-                                env.get("DISCORD_ALLOWED_USERS", "0"))
+                                env.get("DISCORD_ALLOWED_USERS", "0"), env.get("BARMAN_SEARCH_USERS", ""))
             message = getattr(event, "raw_message", None)
             if not policy.in_server(message):
                 return {"action": "skip", "reason": "barman: outside configured server"}
@@ -176,7 +179,7 @@ def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> N
                 await asyncio.wait_for(message.reply("Очередь заполнена. Попробуй чуть позже.",
                                                      mention_author=False,
                                                      allowed_mentions=discord.AllowedMentions.none()), timeout=5)
-            return {"action": "skip", "reason": "barman: isolated owner request"}
+            return {"action": "skip", "reason": "barman: isolated search-enabled request"}
         except Exception:
             log.warning("barman: inbound policy failed closed")
             return {"action": "skip", "reason": "barman: policy unavailable"}

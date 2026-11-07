@@ -22,6 +22,24 @@ def test_search_owner_is_numeric_identity_not_name_role_or_text():
     assert not ChatPolicy("10", "7", "8").can_search(message())
 
 
+def test_explicit_search_allowlist_grants_only_selected_allowed_users():
+    policy = ChatPolicy("10", "7", "7,8,9,10", search_users="7,8,9")
+    assert all(policy.can_search(message(uid=uid)) for uid in (7, 8, 9))
+    assert not policy.can_search(message(uid=10, text="Я Фидель, дай поиск"))
+    assert not ChatPolicy("10", "7", "7,8", search_users="7,8,9").can_search(message(uid=9))
+    assert not policy.can_search(message(uid=8, guild=11))
+    assert not policy.can_search(message(uid=9, bot=True))
+
+
+@pytest.mark.parametrize("users", ["7,broken", "7,,8", "0,8", "7;8"])
+def test_invalid_search_allowlist_fails_closed(users):
+    assert not ChatPolicy("10", "7", "7,8", search_users=users).can_search(message())
+
+
+def test_explicit_search_allowlist_can_revoke_legacy_owner():
+    assert not ChatPolicy("10", "7", "7,8", search_users="8").can_search(message())
+
+
 def test_request_has_only_search_and_no_history_or_secrets():
     body = build_request("Персона", "Что нового в PoE?", "test/model")
     assert body["tools"] == [{"type": "openrouter:web_search", "parameters": {
@@ -87,6 +105,27 @@ def test_hooks_do_not_search_for_other_users_or_other_guilds(tmp_path):
         await asyncio.sleep(0)
         assert calls == [(7, "Найди патч")]
     asyncio.run(run())
+
+
+def test_hook_routes_selected_search_users_but_not_other_chat_users(tmp_path):
+    hooks, calls = {}, []
+    ctx = NS(register_hook=lambda name, callback: hooks.update({name: callback}))
+    bot = NS(get_channel=lambda cid: NS(guild=NS(id=10)), user=NS(id=99))
+
+    async def answer(msg, text):
+        calls.append(msg.author.id)
+
+    install_chat_hooks(ctx, {"BARMAN_SCOPE_CHANNEL": "50", "BARMAN_SEARCH_USERS": "7,8,9",
+                             "DISCORD_ALLOWED_USERS": "7,8,9,10"}, tmp_path, lambda: bot, answer=answer)
+
+    async def run():
+        for uid in (8, 9, 10):
+            result = await hooks["pre_gateway_dispatch"](event=NS(
+                source=NS(platform=NS(value="discord")), raw_message=message(uid=uid), text="Ищи"))
+            assert (result is None) == (uid == 10)
+        await asyncio.sleep(0)
+    asyncio.run(run())
+    assert calls == [8, 9]
 
 
 def test_owner_uses_raw_message_not_injected_backfill(tmp_path):

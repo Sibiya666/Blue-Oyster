@@ -44,6 +44,7 @@ DUSER="${BARMAN_DIGEST_USER:-}"
 DMODEL="${BARMAN_DIGEST_MODEL:-}"
 AIUSERS="${BARMAN_AI_USERS:-}"
 SEARCHOWNER="${BARMAN_SEARCH_OWNER:-0}"
+SEARCHUSERS="${BARMAN_SEARCH_USERS:-}"
 AICH="${BARMAN_AI_CHANNELS:-}"
 SOUL="${BARMAN_SOUL:-}"
 EMOJI="${BARMAN_EMOJI:-}"
@@ -58,6 +59,7 @@ case "$DUSER" in *[!A-Za-z0-9_.]*) echo "BARMAN_DIGEST_USER — имя поль�
 case "$DMODEL$AIMODEL" in *[!A-Za-z0-9_.:/-]*) echo "BARMAN_DIGEST_MODEL / BARMAN_AI_MODEL — id модели OpenRouter"; exit 1 ;; esac
 case "$AIUSERS$AICH$CUSERS" in *[!0-9,]*) echo "BARMAN_AI_USERS / BARMAN_AI_CHANNELS / BARMAN_COMMENT_USERS — ID через запятую"; exit 1 ;; esac
 case "$SEARCHOWNER" in *[!0-9]*) echo "BARMAN_SEARCH_OWNER — один Discord user ID"; exit 1 ;; esac
+case "$SEARCHUSERS" in *[!0-9,]*|,*|*,|*,,*) echo "BARMAN_SEARCH_USERS — Discord user ID через запятую"; exit 1 ;; esac
 case "$CCHANCE$CCOOL" in *[!0-9.]*) echo "BARMAN_COMMENT_CHANCE / BARMAN_COMMENT_COOLDOWN_MIN — числа"; exit 1 ;; esac
 case "$TOKEN" in *[!A-Za-z0-9._-]*) echo "BARMAN_BOT_TOKEN — токен бота Discord"; exit 1 ;; esac
 case "$SOUL" in *[!a-z0-9_-]*) echo "BARMAN_SOUL — имя личности из persona/ (например sibiya)"; exit 1 ;; esac
@@ -125,6 +127,7 @@ set_env HERMES_GATEWAY_BUSY_ACK_ENABLED false  # без служебных «⚡
 set_env DISCORD_ALLOWED_ROLES ""
 set_env DISCORD_ALLOWED_USERS "${AIUSERS:-0}"
 set_env BARMAN_SEARCH_OWNER "$SEARCHOWNER"
+set_env BARMAN_SEARCH_USERS "$SEARCHUSERS"
 set_env DISCORD_ALLOWED_CHANNELS '*'
 set_env BARMAN_COMMENT_USERS "${CUSERS:-0}"
 [ -z "$AICH" ] || set_env BARMAN_COMMENT_CHANNELS "$AICH"
