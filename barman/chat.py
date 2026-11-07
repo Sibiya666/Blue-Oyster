@@ -58,6 +58,8 @@ RULES = (
     " Для PoE подтверждай даты официальной главной, новостями и списком патчей; "
     "отдельная форумная ветка без проверенного автора не считается официальной."
     " Не добавляй имена авторов, служебные детали проверки и советы 'проверь сам', если их не просили."
+    " В этой конфе 'поешка', 'поешечка' и 'пое' без номера обычно означают Path of Exile 2. "
+    "Не спрашивай, что значит этот сленг. Явное указание первой части важнее этого умолчания."
 )
 
 
@@ -68,8 +70,12 @@ def build_request(soul: str, text: str, model: str) -> dict:
     if policy.domains:
         params["allowed_domains"] = list(policy.domains)
     today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+    game_context = f"\nВ этом запросе речь о {policy.game}." if policy.game else ""
+    if policy.game == "Path of Exile 2":
+        game_context += (" Официальный список патчей PoE 2: https://www.pathofexile.com/forum/view-forum/2212. "
+                         "Раздел /forum/view-forum/patch-notes относится к PoE 1, не смешивай их.")
     return {"model": model, "messages": [
-        {"role": "system", "content": soul + "\n\n" + RULES + f"\nСегодня {today} (Москва)."},
+        {"role": "system", "content": soul + "\n\n" + RULES + f"\nСегодня {today} (Москва)." + game_context},
         {"role": "user", "content": text[:2000]}],
         "tools": [{"type": "openrouter:web_search", "parameters": params}],
         "max_tokens": 500, "temperature": 0.5}
@@ -85,7 +91,7 @@ def clean_answer(text: str) -> str:
     return " ".join(parts[:2])[:500].strip() or "Не удалось получить ответ."
 
 
-def source_url(annotations: list, allowed_domains: tuple[str, ...] = ()) -> str | None:
+def source_url(annotations: list, allowed_domains: tuple[str, ...] = (), *, game: str | None = None) -> str | None:
     """Only provider citations, not model-generated links. Never fetch these URLs locally."""
     for item in annotations:
         if not isinstance(item, dict) or item.get("type") != "url_citation":
@@ -99,7 +105,12 @@ def source_url(annotations: list, allowed_domains: tuple[str, ...] = ()) -> str 
             # PoE forum threads may be written by any user. Without an authenticated author,
             # accept only the developer's landing/news/patch-note index on its community domain.
             if allowed_domains and (host == "pathofexile.com" or host.endswith(".pathofexile.com")):
-                if parsed.path.rstrip("/") not in ("", "/news", "/forum/view-forum/news", "/forum/view-forum/patch-notes"):
+                indices = {"", "/news", "/forum/view-forum/news"}
+                if game != "Path of Exile 2":
+                    indices.add("/forum/view-forum/patch-notes")
+                if game != "Path of Exile":
+                    indices.add("/forum/view-forum/2212")  # official PoE 2 Early Access Patch Notes
+                if parsed.path.rstrip("/") not in indices:
                     continue
             if (parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443)
                     or not host or "." not in host or len(url) > 300
@@ -124,7 +135,7 @@ def render_search_reply(data: dict, text: str) -> dict:
     count = (data.get("usage", {}).get("server_tool_use_details") or {}).get("web_search_requests")
     if type(count) is not int or count < 0:
         count = None
-    source = source_url(message.get("annotations") or [], policy.domains)
+    source = source_url(message.get("annotations") or [], policy.domains, game=policy.game)
     verified = bool(count and source)
     status = "verified_search" if verified else ("no_search" if count == 0 else "unobserved_search")
     prose = clean_answer(message.get("content"))

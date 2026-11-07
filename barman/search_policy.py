@@ -14,6 +14,7 @@ class SearchPolicy:
     requires_evidence: bool
     domains: tuple[str, ...] = ()
     clarification: str | None = None
+    game: str | None = None
 
 
 def search_policy(text: str) -> SearchPolicy:
@@ -24,12 +25,19 @@ def search_policy(text: str) -> SearchPolicy:
     fresh = factual_question or bool(FRESH.search(text) and (poe or diablo or FACT_TOPIC.search(text)))
     if not factual_question and re.search(r"анекдот|пошути|сочини|придумай.*(?:шутк|истори|стих)", text):
         fresh = False
-    explicit_poe = bool(re.search(r"path\s+of\s+exile|(?:poe|пое|по[еэ]ш\w*)\s*[12]\b|"
-                                  r"\b(?:первая|первую|вторая|вторую)\s+(?:част[ььи]|poe|пое)\b", text))
-    clarification = "Про PoE 1, PoE 2 или новую лигу?" if poe and fresh and not explicit_poe else None
+    first = bool(re.search(r"(?:poe|пое|по[еэ]ш\w*|path\s+of\s+exile)\s*(?:1\b(?!\.\d)|один\b)|"
+                           r"\bперв(?:ая|ую|ой)\s+(?:част[ььи]|poe|пое|по[еэ]ш\w*)\b", text))
+    game = ("Path of Exile" if first else "Path of Exile 2") if poe else None
+    release_question = bool(re.search(r"когда|во\s+сколько|выйд|выходит|старт|when", text))
+    event = bool(re.search(r"лиг|патч|обнов|сезон|релиз|полно[а-я]*|ранн[а-я]*\s+доступ|\b1\.0\b", text))
+    clarification = None
+    if poe and game == "Path of Exile 2" and release_question and not event:
+        clarification = "Про новую лигу, обновление или полный релиз PoE 2?"
     domains = []
     if fresh and poe:
-        domains.extend(("pathofexile.com", "pathofexile2.com"))
+        domains.append("pathofexile.com")
+        if game == "Path of Exile 2":
+            domains.append("pathofexile2.com")
     if fresh and diablo:
         domains.extend(("news.blizzard.com", "diablo4.blizzard.com"))
-    return SearchPolicy(fresh or bool(EXPLICIT_SEARCH.search(text)), tuple(domains), clarification)
+    return SearchPolicy(fresh or bool(EXPLICIT_SEARCH.search(text)), tuple(domains), clarification, game)

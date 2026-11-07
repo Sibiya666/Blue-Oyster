@@ -9,7 +9,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 
-def result(count=1, url="https://www.pathofexile.com/forum/view-forum/patch-notes", answer="Лига стартует завтра."):
+def result(count=1, url="https://www.pathofexile.com/forum/view-forum/2212", answer="Лига стартует завтра."):
     data = {"id": "gen-test", "choices": [{"message": {"content": answer, "annotations": [
         {"type": "url_citation", "url_citation": {"url": url}}]}}]}
     if count is not None:
@@ -17,12 +17,20 @@ def result(count=1, url="https://www.pathofexile.com/forum/view-forum/patch-note
     return data
 
 
-def test_screenshot_prompt_gets_clarification_instead_of_guessing_poe2():
+def test_screenshot_prompt_knows_poe2_default_and_only_clarifies_event():
     policy = search_policy("че когда поешечка выходит")
     assert policy.clarification and "?" in policy.clarification
+    assert policy.game == "Path of Exile 2" and "полный релиз" in policy.clarification
     assert search_policy("Когда выйдет новая лига PoE 2?").clarification is None
     assert search_policy("Когда следующая лига Path of Exile?").clarification is None
-    assert search_policy("Когда следующая лига поешечки во вторник?").clarification
+    assert search_policy("Когда следующая лига поешечки во вторник?").game == "Path of Exile 2"
+    assert search_policy("Когда следующая лига поешечки во вторник?").clarification is None
+    assert search_policy("Когда новая лига PoE 1?").game == "Path of Exile"
+    assert search_policy("Какая версия PoE 1.").game == "Path of Exile"
+    assert search_policy("Когда новая лига поешечки?").game == "Path of Exile 2"
+    assert search_policy("Когда новая лига Path of Exile?").game == "Path of Exile 2"
+    assert search_policy("Когда новая лига первой поешечки?").game == "Path of Exile"
+    assert search_policy("Когда пое 1.0 выходит?").game == "Path of Exile 2"
 
 
 def test_fresh_game_search_uses_developer_domains():
@@ -53,6 +61,8 @@ def test_verified_search_has_count_and_developer_source():
     assert reply["status"] == "verified_search"
     assert reply["web_search_requests"] == 1
     assert reply["source"].startswith("https://www.pathofexile.com/")
+    assert render_search_reply(result(url="https://www.pathofexile.com/forum/view-forum/patch-notes"),
+                               "Какая версия PoE 2?")["status"] == "unverified_fresh"
 
 
 def test_token_truncated_reply_is_not_published_as_verified_fact():
@@ -117,7 +127,7 @@ def test_ambiguous_reply_does_not_call_model_and_is_audited(reply_path, caplog):
     caplog.set_level(logging.INFO, logger="barman.chat")
     run("че когда поешечка выходит")
     assert not state.posts
-    assert state.replies == ["Про PoE 1, PoE 2 или новую лигу?"]
+    assert state.replies == ["Про новую лигу, обновление или полный релиз PoE 2?"]
     assert audit(caplog)["status"] == "clarification"
 
 
