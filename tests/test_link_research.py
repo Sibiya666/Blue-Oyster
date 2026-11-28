@@ -427,3 +427,70 @@ def test_unconfirmed_or_inapplicable_polarity_does_not_add_yes_no(answer_type,su
 def test_yes_no_formatter_never_publishes_unverified_or_unsafe_reference(result):
     from barman.link_research import format_reference
     assert format_reference(result) is None
+
+
+def test_resolution_audit_records_only_fixed_reason_not_private_model_prose(research_replay):
+    state,run=research_replay
+    state.contents[0]=json.dumps({'scope':'owner_specific','request_kind':'question',
+        'reason_code':'personal_question','resolved_question':'PRIVATE QUESTION','reason':'PRIVATE MODEL PROSE'})
+    result=run()
+    assert result['status']=='skip'
+    assert result['reason_code']=='personal_question'
+    assert result['audit']['resolution']=={'scope':'owner_specific','request_kind':'question','reason_code':'personal_question'}
+    assert 'PRIVATE' not in json.dumps(result['audit'])
+
+
+def test_statement_cannot_launch_search_even_if_resolver_calls_it_public(research_replay):
+    state,run=research_replay
+    plan=json.loads(state.contents[0]);plan.update(request_kind='statement',reason_code='no_question')
+    state.contents[0]=json.dumps(plan)
+    result=run()
+    assert result['status']=='skip'
+    assert result['reason_code']=='no_question'
+    assert len(state.posts)==1
+
+
+def test_owner_reply_review_scrubs_locally_and_never_returns_free_text(research_replay):
+    from barman.link_research import assess_owner_answer
+    from barman.link_pilot import anonymize
+    state,_=research_replay
+    state.contents[0]=json.dumps({'answered':False,'reason_code':'unrelated','explanation':'PRIVATE MODEL PROSE'})
+    scrub=lambda text:anonymize(text,{'OPENROUTER_API_KEY':'known-secret-token-123'},names=['Jo'])
+    verdict=asyncio.run(assess_owner_answer('Jo когда?','known-secret-token-123',
+        ['Jo mail@example.com Опачки'],state.env,scrub=scrub))
+    assert verdict=={'answered':False,'reason_code':'unrelated'}
+    data=json.loads(state.posts[0]['messages'][1]['content'][0]['text'])
+    assert all(s not in json.dumps(data) for s in ('Jo','known-secret','mail@example.com'))
+
+
+@pytest.mark.parametrize('value',[{'answered':True,'reason_code':'unrelated'},
+    {'answered':'false','reason_code':'no_answer'}, {'answered':False,'reason_code':'PRIVATE'}, []])
+def test_invalid_owner_review_fails_closed(research_replay,value):
+    from barman.link_research import assess_owner_answer
+    state,_=research_replay;state.contents[0]=json.dumps(value)
+    assert asyncio.run(assess_owner_answer('When?','',[],state.env)) is None
+
+
+def test_evidence_rejection_audit_explains_quote_failure_without_content(research_replay):
+    state,run=research_replay
+    state.contents[2]=json.dumps({'candidates':[{'url':'https://example.com/manual',
+        'quote':'PRIVATE invented quote never fetched','subject_match':True,'intent_match':True,
+        'time_match':True,'answers_question':True}]})
+    state.contents.append('SEARCH RETRY')
+    result=run()
+    assert 'quote_not_in_source' in result['audit']['evidence_rejections']
+    assert 'PRIVATE' not in json.dumps(result['audit'])
+
+
+@pytest.mark.parametrize('zone',['Europe/Moscow','America/New_York'])
+def test_configured_discussion_timezone_reaches_resolver(research_replay,zone):
+    state,run=research_replay;state.env['BARMAN_REFERENCE_TIMEZONE']=zone
+    assert run()['status']=='grounded'
+    payload=json.loads(state.posts[0]['messages'][1]['content'][0]['text'])
+    assert payload['reference_timezone']==zone
+
+
+def test_invalid_reference_timezone_never_reaches_provider(research_replay):
+    state,run=research_replay;state.env['BARMAN_REFERENCE_TIMEZONE']='not/a/zone'
+    assert run()['reason_code']=='invalid_reference_timezone'
+    assert state.posts==[]

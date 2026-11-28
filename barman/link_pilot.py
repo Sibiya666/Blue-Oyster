@@ -14,7 +14,8 @@ from urllib.parse import urlsplit
 
 from .chat import decode_payload, redact
 from .conversation import collect_episode
-from .link_research import find_reference, format_reference
+from .link_research import (find_reference, format_reference, fetch_document,
+                            public_url, assess_owner_answer)
 from .screenshots import prepare_screenshot
 
 log = logging.getLogger(__name__)
@@ -138,6 +139,36 @@ def anonymized_context(texts, env, *, names=()):
     return '\n'.join(anonymize(text, env, names=names)[:per_item] for text in texts)
 
 
+async def prepare_public_references(messages, scrub, *, env=None):
+    """Read at most two public pages locally; never forward URLs or SDK previews.
+
+    Drop query credentials/tracking before fetching, use the research fetcher's
+    DNS/redirect protections, and scrub the fetched text before bounding it.
+    An inaccessible page does not authorize using a potentially private embed.
+    """
+    references, seen = {}, set()
+    for message in reversed(list(messages)):
+        for raw in re.findall(r'https?://[^\s<>]+', message.content or ''):
+            try:
+                parts = urlsplit(raw.rstrip('.,;!'))
+                url = parts._replace(query='', fragment='').geturl()
+            except ValueError:
+                continue
+            if len(seen) >= 2: return references
+            if not public_url(url) or url in seen or redact(url, env or {}) != url: continue
+            seen.add(url)
+            try:
+                document = await fetch_document(url)
+            except Exception as error:
+                log.info('barman: public reference unavailable error_type=%s', type(error).__name__)
+                document = None
+            if document:
+                clean = scrub(document)[:1800]
+                if clean.strip():
+                    references[message.id] = references.get(message.id, '') + '\npublic_reference: ' + clean
+    return references
+
+
 class PilotState:
     """Persistent deduplication/budget; corrupted state disables the experiment."""
     def __init__(self, path):
@@ -161,16 +192,50 @@ class PilotState:
 
     def reserve(self, message_id, author_id, channel_id, now):
         day = now.date().isoformat()
-        if message_id in self.entries or sum(v.get('day') == day for v in self.entries.values()) >= 25:
+        existing = self.entries.get(message_id)
+        if existing:
+            try:
+                fresh = timedelta(0) <= now - datetime.fromisoformat(existing['time']) <= timedelta(minutes=15)
+            except (KeyError, ValueError, TypeError):
+                fresh = False
+            if (existing.get('status') != 'retryable' or existing.get('author_id') != author_id
+                    or existing.get('channel_id') != channel_id or existing.get('attempts', 1) >= 2
+                    or not fresh or not self.can_send(author_id, now)):
+                return False
+            existing.update(status='pending', attempts=existing.get('attempts', 1) + 1)
+            self.save()
+            return True
+        if sum(v.get('day') == day for v in self.entries.values()) >= 25:
             return False
         if len(self.entries) >= 1000:
             return False
         if not self.can_send(author_id, now):
             return False
         self.entries[message_id] = {'author_id': author_id, 'channel_id': channel_id, 'day': day,
-                                    'time': now.isoformat(), 'status': 'pending'}
+                                    'time': now.isoformat(), 'status': 'pending', 'attempts': 1}
         self.save()
         return True
+
+    def recover_pending(self, now, settings):
+        recover = []
+        changed = False
+        for mid, entry in self.entries.items():
+            if entry.get('status') not in ('pending', 'retryable'): continue
+            changed = True
+            try:
+                created = datetime.fromisoformat(entry['time'])
+                fresh = (settings.start <= now < settings.until
+                         and settings.start <= created <= now
+                         and now - created <= timedelta(minutes=15))
+            except (KeyError, ValueError, TypeError):
+                fresh = False
+            reason = ('recovery_attempt_limit' if entry.get('attempts', 1) >= 2
+                      else 'recovery_expired' if not fresh else 'restart_recovery')
+            entry.update(status='retryable' if reason == 'restart_recovery' else 'interrupted',
+                         reason_code=reason)
+            if reason == 'restart_recovery': recover.append(mid)
+        if changed: self.save()
+        return recover
 
     def can_send(self, author_id, now):
         sent = [v for v in self.entries.values() if v.get('status') in ('sent', 'logged')]
@@ -233,20 +298,25 @@ async def classify(text, reference, env, *, names=(), glossary=''):
 
 def install_link_pilot(bot, env, home):
     settings = PilotSettings.from_env(env)
-    if settings is None or datetime.now(timezone.utc) >= settings.until:
+    if settings is None:
         log.info('barman: link pilot disabled or expired')
         return
     if getattr(bot, '_barman_link_pilot_installed', False): return
     try:
         state = PilotState(home / 'barman' / 'link-pilot.json')
+        recovery_ids = state.recover_pending(datetime.now(timezone.utc), settings)
     except Exception:
         log.warning('barman: link pilot state invalid; disabled')
+        return
+    if datetime.now(timezone.utc) >= settings.until:
+        log.info('barman: link pilot disabled or expired')
         return
     mode = 'post' if env.get('BARMAN_LINK_PILOT_MODE') == 'post' else 'log'
     bot._barman_link_pilot_installed = True
     lock = asyncio.Lock()
     pending = 0
     recent_speakers = {}
+    recovered = False
 
     async def process(message):
         async with lock:
@@ -263,40 +333,75 @@ def install_link_pilot(bot, env, home):
                 if not state.reserve(mid, str(message.author.id), str(message.channel.id), now): return
                 reserved = True
                 original = message.content
-
-                async def still_needed():
-                    if not settings.start <= datetime.now(timezone.utc) < settings.until: return False
-                    if not state.can_send(str(message.author.id), datetime.now(timezone.utc)): return False
-                    current = await message.channel.fetch_message(message.id)
-                    if current.content != original: return False
-                    for snapshot in episode.snapshots:
-                        current_parent = await message.channel.fetch_message(snapshot['message_id'])
-                        if current_parent.content != snapshot['content']: return False
-                        if tuple(a.id for a in getattr(current_parent, 'attachments', [])) != snapshot['attachment_ids']: return False
-                    after = [m async for m in message.channel.history(limit=30, after=message, oldest_first=False)]
-                    if len(after) == 30: return False  # too much traffic to prove no one answered
-                    return not any(str(m.author.id) == settings.owner or
-                                   (str(m.author.id) == bot_id and getattr(getattr(m, 'reference', None), 'message_id', None) == message.id)
-                                   for m in after)
-
-                await asyncio.sleep(20)
-                if not await still_needed():
-                    state.finish(mid, 'owner_answered_or_stale')
-                    return
+                stop_reason = 'not_checked'
                 names = [value for member in message.guild.members for value in
                          (getattr(member, 'name', ''), getattr(member, 'display_name', ''), getattr(member, 'global_name', ''))]
                 for item in episode.messages:
                     member = item['message'].author
                     names.extend((getattr(member, 'name', ''), getattr(member, 'display_name', ''),
                                   getattr(member, 'global_name', '')))
+                scrub = lambda text: anonymize(text, env, names=names)
+                def pack(references):
+                    texts = [m['role'] + ': ' + m['text']
+                             for m in episode.messages if m['message'].id != message.id]
+                    context = anonymized_context(texts, env, names=names)
+                    # Public identity must not vanish behind the per-message
+                    # truncation of long private roots; keep separate budgets.
+                    if references:
+                        per_reference = 1800 // len(references)
+                        context += '\n' + '\n'.join(text[:per_reference] for text in references.values())
+                    return context
+                packed = pack({})
+                reviewed = {}
+
+                async def still_needed():
+                    nonlocal stop_reason
+                    if not settings.start <= datetime.now(timezone.utc) < settings.until:
+                        stop_reason = 'pilot_expired'; return False
+                    if not state.can_send(str(message.author.id), datetime.now(timezone.utc)):
+                        stop_reason = 'delivery_budget'; return False
+                    current = await message.channel.fetch_message(message.id)
+                    if current.content != original:
+                        stop_reason = 'question_edited'; return False
+                    for snapshot in episode.snapshots:
+                        current_parent = await message.channel.fetch_message(snapshot['message_id'])
+                        if current_parent.content != snapshot['content']:
+                            stop_reason = 'context_edited'; return False
+                        if tuple(a.id for a in getattr(current_parent, 'attachments', [])) != snapshot['attachment_ids']:
+                            stop_reason = 'attachments_edited'; return False
+                    after = [m async for m in message.channel.history(limit=30, after=message, oldest_first=False)]
+                    if len(after) == 30:
+                        stop_reason = 'history_overflow'; return False
+                    if any(str(m.author.id) == bot_id and getattr(getattr(m, 'reference', None), 'message_id', None) == message.id for m in after):
+                        stop_reason = 'bot_answered'; return False
+                    replies = [m for m in after if str(m.author.id) == settings.owner]
+                    if replies:
+                        if len(replies) > 8 or any(not hasattr(m, 'content') for m in replies):
+                            stop_reason = 'owner_review_unavailable'; return False
+                        key = (packed, tuple((str(m.id), m.content) for m in replies))
+                        if key not in reviewed:
+                            reviewed[key] = await assess_owner_answer(original, packed,
+                                [m.content for m in reversed(replies)], env, scrub=scrub)
+                        verdict = reviewed[key]
+                        if verdict is None:
+                            stop_reason = 'owner_review_failed'; return False
+                        if verdict['answered']:
+                            stop_reason = 'owner_answered'; return False
+                    stop_reason = 'still_needed'
+                    return True
+
+                await asyncio.sleep(20)
+                if not await still_needed():
+                    state.finish(mid, 'owner_answered_or_stale', reason_code=stop_reason)
+                    return
                 # Only public vocabulary, not character biography or speech instructions.
                 glossary = '\n'.join(line for line in (home / 'SOUL.md').read_text().splitlines()
                                      if line.startswith('- Сленг сервера:'))
-                scrub = lambda text: anonymize(text, env, names=names)
-                packed = anonymized_context([m['role'] + ': ' + m['text'] for m in episode.messages if m['message'].id != message.id], env, names=names)
+                references = await prepare_public_references([m['message'] for m in episode.messages], scrub, env=env)
+                packed = pack(references)
                 images = await prepare_images(episode.attachments, scrub) if episode.attachments else []
                 if not await still_needed():
-                    state.finish(mid, 'owner_answered_or_stale')
+                    state.finish(mid, 'owner_answered_or_stale', reason_code=stop_reason)
                     return
                 result = await find_reference(original, packed, env, images=images, glossary=glossary,
                                               channel_hint=episode.topic_hint, scrub=scrub,
@@ -306,7 +411,9 @@ def install_link_pilot(bot, env, home):
                 if reply and await still_needed():
                     parts = urlsplit(url)
                     metadata = {'source':f'{parts.scheme}://{parts.netloc}{parts.path}',
-                                'images':len(images), 'research':result['audit']}
+                                'images':len(images), 'public_references':len(references),
+                                'owner_reply_reviews':[v for v in reviewed.values() if v is not None],
+                                'reason_code':result.get('reason_code', 'supported_source'), 'research':result['audit']}
                     if mode == 'log':
                         state.finish(mid, 'logged', decided_at=datetime.now(timezone.utc).isoformat(),
                                      candidate_reply=reply, **metadata)
@@ -317,12 +424,35 @@ def install_link_pilot(bot, env, home):
                         state.finish(mid, 'sent', sent_at=datetime.now(timezone.utc).isoformat(),
                                      reply_message_id=str(sent.id), **metadata)
                 else:
-                    state.finish(mid, 'unverified_or_stale', outcome=result['status'], research=result['audit'])
+                    state.finish(mid, 'unverified_or_stale', outcome=result['status'],
+                                 reason_code=stop_reason if stop_reason != 'still_needed' else result.get('reason_code', 'unverified'),
+                                 public_references=len(references),
+                                 owner_reply_reviews=[v for v in reviewed.values() if v is not None], research=result['audit'])
             except Exception as error:
                 log.warning('barman: link pilot failed error_type=%s', type(error).__name__)
                 if reserved:
-                    try: state.finish(mid, 'error')
+                    try: state.finish(mid, 'error', reason_code='processing_error', error_type=type(error).__name__)
                     except Exception: pass
+
+    async def recover():
+        nonlocal recovered
+        if recovered: return
+        recovered = True
+        for mid in recovery_ids:
+            if state.entries[mid]['status'] != 'retryable': continue
+            entry = state.entries[mid]
+            try:
+                channel = bot.get_channel(int(entry['channel_id']))
+                message = await channel.fetch_message(int(mid))
+                if (str(message.author.id) != entry['author_id'] or
+                        str(message.channel.id) != entry['channel_id']):
+                    state.finish(mid, 'interrupted', reason_code='recovery_identity_mismatch')
+                    continue
+                await process(message)
+                if state.entries[mid]['status'] == 'retryable':
+                    state.finish(mid, 'interrupted', reason_code='recovery_ineligible')
+            except Exception as error:
+                state.finish(mid, 'interrupted', reason_code='recovery_failed', error_type=type(error).__name__)
 
     async def on_message(message):
         nonlocal pending
@@ -355,4 +485,5 @@ def install_link_pilot(bot, env, home):
             pending -= 1
 
     bot.add_listener(on_message, 'on_message')
+    bot.add_listener(recover, 'on_ready')
     log.info('barman: link pilot active mode=%s until=%s', mode, settings.until.isoformat())

@@ -95,7 +95,7 @@ def test_listener_waits_and_skips_if_owner_already_answered(tmp_path,monkeypatch
     monkeypatch.setattr(link_pilot,'classify',classify)
     listeners=[]
     bot=NS(user=NS(id=99),get_channel=lambda i:NS(guild=NS(id=10)),
-           add_listener=lambda fn,event:listeners.append(fn))
+           add_listener=lambda fn,event:listeners.append(fn) if event == "on_message" else None)
     env={'BARMAN_LINK_PILOT_OWNER':'7','BARMAN_SCOPE_CHANNEL':'10',
          'BARMAN_LINK_PILOT_START':(now-timedelta(minutes=1)).isoformat(),
          'BARMAN_LINK_PILOT_UNTIL':(now+timedelta(days=6)).isoformat()}
@@ -128,7 +128,7 @@ def test_listener_rechecks_owner_response_after_research(tmp_path,monkeypatch):
     monkeypatch.setattr(link_pilot,'classify',classify)
     monkeypatch.setattr(link_pilot,'find_reference',research)
     bot=NS(user=NS(id=99),get_channel=lambda i:NS(guild=NS(id=10)),
-           add_listener=lambda fn,event:listeners.append(fn))
+           add_listener=lambda fn,event:listeners.append(fn) if event == "on_message" else None)
     env={'BARMAN_LINK_PILOT_OWNER':'7','BARMAN_SCOPE_CHANNEL':'10',
          'BARMAN_LINK_PILOT_START':(now-timedelta(minutes=1)).isoformat(),
          'BARMAN_LINK_PILOT_UNTIL':(now+timedelta(days=6)).isoformat()}
@@ -153,7 +153,7 @@ def test_listener_cancels_if_referenced_context_was_edited(tmp_path,monkeypatch)
     monkeypatch.setattr(link_pilot.asyncio,'sleep',no_sleep)
     monkeypatch.setattr(link_pilot,'classify',classify)
     bot=NS(user=NS(id=99),get_channel=lambda i:NS(guild=NS(id=10)),
-           add_listener=lambda fn,event:listeners.append(fn))
+           add_listener=lambda fn,event:listeners.append(fn) if event == "on_message" else None)
     env={'BARMAN_LINK_PILOT_OWNER':'7','BARMAN_SCOPE_CHANNEL':'10',
          'BARMAN_LINK_PILOT_START':(now-timedelta(minutes=1)).isoformat(),
          'BARMAN_LINK_PILOT_UNTIL':(now+timedelta(days=6)).isoformat()}
@@ -214,7 +214,7 @@ def pilot_runtime(tmp_path):
                 yield item
     channel.fetch_message, channel.history = fetch, history
     bot = NS(user=NS(id=99), get_channel=lambda _: NS(guild=guild),
-             add_listener=lambda fn, _: listeners.append(fn))
+             add_listener=lambda fn, event: listeners.append(fn) if event == "on_message" else None)
     env = {'BARMAN_LINK_PILOT_OWNER': '7', 'BARMAN_SCOPE_CHANNEL': '20',
            'BARMAN_LINK_PILOT_START': (now-timedelta(minutes=1)).isoformat(),
            'BARMAN_LINK_PILOT_UNTIL': (now+timedelta(days=1)).isoformat()}
@@ -386,3 +386,163 @@ def test_only_explicit_post_mode_sends_and_records_delivery(tmp_path, monkeypatc
     assert sent==['Нет. <https://example.com/manual>']
     entry=PilotState(tmp_path/'barman/link-pilot.json').entries['100']
     assert entry['status']=='sent' and entry['reply_message_id']=='123'
+
+
+def test_public_reference_is_fetched_without_tracking_and_scrubbed_before_model(monkeypatch):
+    import asyncio
+    from barman import link_pilot
+    seen = []
+    async def fetch(url):
+        seen.append(url)
+        return 'EVE Vanguard is an extraction FPS. Jo mail@example.com known-secret-123'
+    monkeypatch.setattr(link_pilot, 'fetch_document', fetch, raising=False)
+    m = NS(id=1, content='https://news.example/article?token=private#tracking', embeds=[])
+    refs = asyncio.run(link_pilot.prepare_public_references([m],
+        lambda text: anonymize(text, {'OPENROUTER_API_KEY': 'known-secret-123'}, names=['Jo'])))
+    assert seen == ['https://news.example/article']
+    assert 'EVE Vanguard' in refs[1]
+    assert all(s not in refs[1] for s in ('Jo', 'mail@example.com', 'known-secret', 'private'))
+
+
+def test_public_reference_never_uses_unfetched_or_forged_preview(monkeypatch):
+    import asyncio
+    from barman import link_pilot
+    async def fetch(url): return None
+    monkeypatch.setattr(link_pilot, 'fetch_document', fetch, raising=False)
+    m = NS(id=1, content='https://news.example/article',
+           embeds=[NS(title='Private forged preview', description='Do not disclose')])
+    assert asyncio.run(link_pilot.prepare_public_references([m], lambda t:t)) == {}
+
+
+def test_pending_recovery_is_bounded_and_keeps_original_budget(tmp_path):
+    state = PilotState(tmp_path/'state.json')
+    assert state.reserve('1','8','10',NOW)
+    assert state.reserve('2','9','10',NOW-timedelta(hours=1))
+    assert state.recover_pending(NOW+timedelta(minutes=1), SETTINGS) == ['1']
+    assert state.entries['2']['status'] == 'interrupted'
+    assert state.entries['2']['reason_code'] == 'recovery_expired'
+    assert state.reserve('1','8','10',NOW+timedelta(minutes=1))
+    assert state.entries['1']['attempts'] == 2
+    assert state.entries['1']['time'] == NOW.isoformat()
+    assert state.recover_pending(NOW+timedelta(minutes=2), SETTINGS) == []
+    assert state.entries['1']['reason_code'] == 'recovery_attempt_limit'
+
+
+def test_unrelated_owner_message_does_not_cancel_candidate(tmp_path, monkeypatch):
+    import asyncio
+    from barman import link_pilot
+    runtime=pilot_runtime(tmp_path)
+    question=runtime.make(100,text='В 18 получается?')
+    runtime.after.append(runtime.make(101,uid=7,mentions=(),text='Опачки'))
+    calls=[]
+    async def no_sleep(_): pass
+    async def assess(*args,**kwargs): return {'answered':False,'reason_code':'unrelated'}
+    async def research(*args,**kwargs):
+        calls.append(True)
+        return {'url':'https://example.com/time','status':'grounded','verdict':'yes','audit':{}}
+    monkeypatch.setattr(link_pilot.asyncio,'sleep',no_sleep)
+    monkeypatch.setattr(link_pilot,'assess_owner_answer',assess,raising=False)
+    monkeypatch.setattr(link_pilot,'find_reference',research)
+    link_pilot.install_link_pilot(runtime.bot,runtime.env,tmp_path)
+    asyncio.run(runtime.listeners[0](question))
+    entry=PilotState(tmp_path/'barman/link-pilot.json').entries['100']
+    assert calls == [True]
+    assert entry['status']=='logged'
+    assert entry['candidate_reply']=='Да. <https://example.com/time>'
+
+
+def test_expired_pilot_finalizes_old_pending_without_installing_listener(tmp_path):
+    from barman import link_pilot
+    path=tmp_path/'barman/link-pilot.json';state=PilotState(path)
+    assert state.reserve('1','8','10',NOW)
+    bot=NS(add_listener=lambda *a:pytest.fail('expired listener installed'))
+    env={'BARMAN_LINK_PILOT_OWNER':'7','BARMAN_LINK_PILOT_START':NOW.isoformat(),
+         'BARMAN_LINK_PILOT_UNTIL':(NOW+timedelta(days=7)).isoformat()}
+    link_pilot.install_link_pilot(bot,env,tmp_path)
+    entry=PilotState(path).entries['1']
+    assert entry['status']=='interrupted'
+    assert entry['reason_code']=='recovery_expired'
+
+
+def test_unavailable_public_page_does_not_abort_other_candidates(monkeypatch):
+    import asyncio
+    from barman import link_pilot
+    class TransportError(Exception): pass
+    async def fetch(url): raise TransportError('private request details')
+    monkeypatch.setattr(link_pilot,'fetch_document',fetch)
+    m=NS(id=1,content='https://public.example/article',embeds=[])
+    assert asyncio.run(link_pilot.prepare_public_references([m],lambda t:t)) == {}
+
+
+def test_startup_recovery_does_not_relabel_live_inflight_work(tmp_path,monkeypatch):
+    import asyncio
+    from barman import link_pilot
+    runtime=pilot_runtime(tmp_path);listeners={}
+    runtime.bot.add_listener=lambda fn,event:listeners.setdefault(event,fn)
+    async def no_sleep(_):pass
+    async def research(*args,**kwargs):return {'status':'skip','reason_code':'no_question','audit':{}}
+    monkeypatch.setattr(link_pilot.asyncio,'sleep',no_sleep)
+    monkeypatch.setattr(link_pilot,'find_reference',research)
+    link_pilot.install_link_pilot(runtime.bot,runtime.env,tmp_path)
+    state=PilotState(tmp_path/'barman/link-pilot.json')
+    # A live reservation created after installation is not a crashed startup job.
+    assert state.reserve('100','8','20',datetime.now(timezone.utc))
+    asyncio.run(listeners['on_ready']())
+    assert PilotState(tmp_path/'barman/link-pilot.json').entries['100']['status']=='pending'
+
+
+def test_ready_recovers_fresh_job_once_without_delivery(tmp_path,monkeypatch):
+    import asyncio
+    from barman import link_pilot
+    runtime=pilot_runtime(tmp_path);listeners={};calls=[]
+    message=runtime.make(100,text='Что это?')
+    message.channel.guild=message.guild
+    runtime.bot.get_channel=lambda _:message.channel
+    runtime.bot.add_listener=lambda fn,event:listeners.setdefault(event,fn)
+    state=PilotState(tmp_path/'barman/link-pilot.json')
+    assert state.reserve('100','8','20',message.created_at)
+    async def no_sleep(_):pass
+    async def research(*args,**kwargs):
+        calls.append(True)
+        return {'status':'grounded','url':'https://example.com/manual','audit':{}}
+    monkeypatch.setattr(link_pilot.asyncio,'sleep',no_sleep)
+    monkeypatch.setattr(link_pilot,'find_reference',research)
+    link_pilot.install_link_pilot(runtime.bot,runtime.env,tmp_path)
+    async def ready():
+        await listeners['on_ready']()
+        await listeners['on_ready']()
+    asyncio.run(ready())
+    entry=PilotState(tmp_path/'barman/link-pilot.json').entries['100']
+    assert entry['status']=='logged' and entry['attempts']==2
+    assert calls==[True]
+
+
+def test_contentful_owner_answer_cancels_and_records_specific_reason(tmp_path,monkeypatch):
+    import asyncio
+    from barman import link_pilot
+    runtime=pilot_runtime(tmp_path)
+    message=runtime.make(100,text='В 18 получается?')
+    runtime.after.append(runtime.make(101,uid=7,mentions=(),text='Да, в 18 по Москве'))
+    async def no_sleep(_):pass
+    async def assess(*args,**kwargs):return {'answered':True,'reason_code':'answered'}
+    async def research(*args,**kwargs):pytest.fail('answered question researched')
+    monkeypatch.setattr(link_pilot.asyncio,'sleep',no_sleep)
+    monkeypatch.setattr(link_pilot,'assess_owner_answer',assess)
+    monkeypatch.setattr(link_pilot,'find_reference',research)
+    link_pilot.install_link_pilot(runtime.bot,runtime.env,tmp_path)
+    asyncio.run(runtime.listeners[0](message))
+    entry=PilotState(tmp_path/'barman/link-pilot.json').entries['100']
+    assert entry['status']=='owner_answered_or_stale'
+    assert entry['reason_code']=='owner_answered'
+
+
+def test_malformed_recovery_entry_disables_only_pilot(tmp_path):
+    import json
+    from barman import link_pilot
+    now=datetime.now(timezone.utc)
+    home=tmp_path/'barman';home.mkdir()
+    (home/'link-pilot.json').write_text(json.dumps({'1':{'status':'pending','attempts':'invalid','time':now.isoformat()}}))
+    bot=NS(add_listener=lambda *args:pytest.fail('invalid pilot installed'))
+    env={'BARMAN_LINK_PILOT_OWNER':'7','BARMAN_LINK_PILOT_START':(now-timedelta(minutes=1)).isoformat(),
+         'BARMAN_LINK_PILOT_UNTIL':(now+timedelta(days=1)).isoformat()}
+    link_pilot.install_link_pilot(bot,env,tmp_path)
