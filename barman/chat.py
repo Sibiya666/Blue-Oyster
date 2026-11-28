@@ -382,6 +382,8 @@ async def answer_owner(message, text: str, env: dict, home: Path, *, history=Non
 
 def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> None:
     from .dialogue import DialogueMemory
+    from .routed_chat import parse_routes
+    routes = parse_routes(env.get('BARMAN_CHAT_ROUTES',''))
     memory = DialogueMemory()
     pending = 0
     lock = asyncio.Lock()
@@ -400,6 +402,10 @@ def install_chat_hooks(ctx, env: dict, home: Path, get_bot, *, answer=None) -> N
             message = getattr(event, "raw_message", None)
             if not policy.in_server(message):
                 return {"action": "skip", "reason": "barman: outside configured server"}
+            if routes is None:
+                return {"action":"skip","reason":"barman: invalid reply routing"}
+            if str(getattr(getattr(message,'author',None),'id','')) in routes:
+                return {"action":"skip","reason":"barman: dedicated reply destination"}
             self_id = getattr(getattr(bot, "user", None), "id", None)
             if not self_id or not any(getattr(u, "id", None) == self_id for u in getattr(message, "mentions", [])):
                 return {"action": "skip", "reason": "barman: no mention"}
