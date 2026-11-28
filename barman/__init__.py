@@ -278,6 +278,8 @@ def register(ctx) -> None:
 
         from .link_pilot import install_link_pilot
         install_link_pilot(bot, env, home)
+        from .routed_chat import install_routed_chat
+        install_routed_chat(bot, env, home)
 
         from .comments import CommentGate, parse_settings
         from datetime import datetime, timezone
