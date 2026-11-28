@@ -10,6 +10,7 @@
 |---|---|---|
 | Роли по реакциям | `barman/reaction_roles.py`, регистрация в `barman/__init__.py` | `tests/test_reaction_roles.py` |
 | Доступ, ответы и поиск | `barman/chat.py`, `barman/dialogue.py` | `tests/test_chat_policy.py`, `tests/test_dialogue.py`, `tests/test_search_quality.py` |
+| Выделенная комната ответа (сверено 2026-11-28) | `barman/routed_chat.py`, хук в `barman/chat.py`, регистрация в `barman/__init__.py` | `tests/test_routed_chat.py` |
 | Ежедневная выжимка | `barman/digest.py` | `tests/test_digest.py` |
 | Редкие реплики | `barman/comments.py` | `tests/test_comments.py`, `tests/test_comment_runtime.py` |
 | Ограниченный эпизод разговора | `barman/conversation.py` | `tests/test_conversation.py` |
